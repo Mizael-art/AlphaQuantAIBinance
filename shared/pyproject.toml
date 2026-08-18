@@ -1,0 +1,21 @@
+[project]
+name = "alphaquant-core"
+version = "0.1.0"
+description = "Modelos de banco e configuração compartilhados entre a API e o Worker do AlphaQuant X"
+requires-python = ">=3.11"
+dependencies = [
+    "sqlalchemy>=2.0",
+    "psycopg2-binary>=2.9",
+    "pydantic-settings>=2.2",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "requests>=2.32",
+    "python-telegram-bot>=21.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["alphaquant_core*"]
