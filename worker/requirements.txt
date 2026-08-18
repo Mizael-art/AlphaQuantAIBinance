@@ -3,7 +3,4 @@ pandas>=2.2
 numpy>=1.26
 requests>=2.32
 python-telegram-bot>=21.0
-
-# testes
-pytest>=8.0
-pgserver>=0.1  # Postgres embarcado (sem apt/docker) para testes de integração
+psycopg2-binary>=2.9
