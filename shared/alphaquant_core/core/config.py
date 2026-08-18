@@ -42,10 +42,11 @@ class Settings(BaseSettings):
 
     @property
     def database_url_normalized(self) -> str:
-        url = self.DATABASE_URL
-        if url and url.startswith("postgres://"):
+        url = (self.DATABASE_URL or "").strip().strip('"').strip("'")
+        if url.startswith("postgres://"):
             return url.replace("postgres://", "postgresql://", 1)
         return url
+
 
     @property
     def scan_assets(self) -> list[str]:
