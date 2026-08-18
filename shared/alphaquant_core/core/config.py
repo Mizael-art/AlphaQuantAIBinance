@@ -44,8 +44,18 @@ class Settings(BaseSettings):
     def database_url_normalized(self) -> str:
         url = (self.DATABASE_URL or "").strip().strip('"').strip("'")
         if url.startswith("postgres://"):
-            return url.replace("postgres://", "postgresql://", 1)
+            url = url.replace("postgres://", "postgresql://", 1)
+
+        # Trata hostnames curtos do Render (dpg-xxxxxx-a) quando o DNS interno falha
+        if "@dpg-" in url and ".render.com" not in url:
+            prefix, remainder = url.split("@dpg-", 1)
+            if "/" in remainder:
+                host_code, db_name = remainder.split("/", 1)
+                url = f"{prefix}@dpg-{host_code}.singapore-postgres.render.com/{db_name}"
+            else:
+                url = f"{prefix}@dpg-{remainder}.singapore-postgres.render.com"
         return url
+
 
 
     @property
