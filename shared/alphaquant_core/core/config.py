@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     SCAN_TIMEFRAMES: str = "15m,1h,4h"
 
     @property
+    def database_url_normalized(self) -> str:
+        url = self.DATABASE_URL
+        if url and url.startswith("postgres://"):
+            return url.replace("postgres://", "postgresql://", 1)
+        return url
+
+    @property
     def scan_assets(self) -> list[str]:
         return [s.strip().upper() for s in self.SCAN_ASSETS.split(",") if s.strip()]
 
@@ -56,3 +63,4 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
