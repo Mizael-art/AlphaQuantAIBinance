@@ -33,6 +33,8 @@ services:
         sync: false
       - key: TELEGRAM_FUTURE_CHAT_ID
         sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
       - key: MARKET_DATA_API_KEY
         sync: false
       - key: JWT_SECRET

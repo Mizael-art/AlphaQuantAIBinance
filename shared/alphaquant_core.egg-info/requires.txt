@@ -1,0 +1,7 @@
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+pydantic-settings>=2.2
+pandas>=2.2
+numpy>=1.26
+requests>=2.32
+python-telegram-bot>=21.0

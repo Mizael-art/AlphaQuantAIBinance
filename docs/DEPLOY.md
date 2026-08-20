@@ -43,6 +43,21 @@
 11. **Teste** — com `TEST_MODE=true` (padrão), confirmar que mensagens
     chegam marcadas como `🧪 TEST MODE` e que nenhum alerta é tratado
     como sinal real.
+12. **Comando manual `/analisar`** — depois que a API estiver publicada
+    (Render já dá a URL `https://<app>.onrender.com`), registrar o
+    webhook do Telegram apontando pra ela:
+    ```bash
+    curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
+      -d "url=https://<sua-api>.onrender.com/webhooks/telegram" \
+      -d "secret_token=<mesmo valor de TELEGRAM_WEBHOOK_SECRET>"
+    ```
+    A partir daí, mandar `/analisar` (ou `/scan`) no grupo de sinais
+    dispara uma análise imediata, sem esperar o próximo ciclo de
+    `SCAN_INTERVAL_MINUTES`. Só chats com `TELEGRAM_SIGNALS_CHAT_ID` ou
+    `TELEGRAM_FUTURE_CHAT_ID` conseguem disparar — qualquer outro chat
+    recebe um aviso de "não autorizado" e nada acontece.
+    Para conferir que o webhook está ativo: `GET
+    https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo`.
 
 ## TradingView (opcional — o Data Engine já funciona sem isso)
 

@@ -67,10 +67,83 @@ class AlertType(str, enum.Enum):
     INVALIDATION = "INVALIDATION"
 
 
+class StrategyStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    ARCHIVED = "ARCHIVED"
+
+
+class Strategy(Base):
+    """
+    Estratégia criada por PROMPT (seções 12-29). Persistida — sobrevive a
+    restart do Worker/API (mesma exigência da seção 102 aplicada aqui).
+    O texto do prompt e a validação ficam em `StrategyVersion`; esta
+    tabela guarda só o que é estável entre versões (nome, modo, status).
+    """
+    __tablename__ = "strategies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    mode: Mapped[str] = mapped_column(String(16), default="SCANNER")  # SCANNER | SWING | INTRADAY | DAY_TRADE
+    status: Mapped[StrategyStatus] = mapped_column(Enum(StrategyStatus), default=StrategyStatus.ACTIVE, index=True)
+    current_version_id: Mapped[int | None] = mapped_column(ForeignKey("strategy_versions.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    versions: Mapped[list["StrategyVersion"]] = relationship(
+        back_populates="strategy", order_by="StrategyVersion.id",
+        foreign_keys="StrategyVersion.strategy_id",
+    )
+    current_version: Mapped["StrategyVersion | None"] = relationship(foreign_keys=[current_version_id])
+
+
+class StrategyVersion(Base):
+    """
+    Uma versão imutável do prompt de uma estratégia (seção 28 — nunca
+    sobrescrita; `update()` sempre cria uma linha nova e move
+    `Strategy.current_version_id`).
+    """
+    __tablename__ = "strategy_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strategy_id: Mapped[int] = mapped_column(ForeignKey("strategies.id"), index=True)
+    version_label: Mapped[str] = mapped_column(String(16))  # "v1", "v2", ...
+    prompt_raw: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String(32))  # VALID | INVALID | UNSUPPORTED_CONDITION
+    errors: Mapped[list] = mapped_column(JSON, default=list)
+    unsupported_conditions: Mapped[list] = mapped_column(JSON, default=list)
+    author: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    change_note: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    strategy: Mapped["Strategy"] = relationship(back_populates="versions", foreign_keys=[strategy_id])
+
+
 class TelegramStatus(str, enum.Enum):
     PENDING = "PENDING"
     SENT = "SENT"
     FAILED = "FAILED"
+
+
+class TradeStatus(str, enum.Enum):
+    OPEN = "OPEN"
+    TP1_HIT = "TP1_HIT"
+    TP2_HIT = "TP2_HIT"
+    TP3_HIT = "TP3_HIT"
+    TP4_HIT = "TP4_HIT"
+    TP5_HIT = "TP5_HIT"
+    STOP_HIT = "STOP_HIT"
+    CLOSED = "CLOSED"
+    EXPIRED = "EXPIRED"
+    INVALIDATED = "INVALIDATED"
+
+
+class TradeResult(str, enum.Enum):
+    WIN = "WIN"
+    LOSS = "LOSS"
+    BREAKEVEN = "BREAKEVEN"
+    PARTIAL_WIN = "PARTIAL_WIN"
+    PARTIAL_LOSS = "PARTIAL_LOSS"
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +291,24 @@ class SystemHealth(Base):
     error: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
+class ManualScanRequest(Base):
+    """
+    Fila de pedidos de análise manual disparados pelo comando /analisar
+    no Telegram (webhook `POST /webhooks/telegram`). O Worker (ou o
+    scanner embutido da API no Free Plan) faz polling curto desta tabela
+    enquanto espera o próximo fechamento de vela automático, e roda um
+    ciclo de scan assim que encontra um pedido `processed_at IS NULL` —
+    sem esperar os 15 minutos do ciclo agendado.
+    """
+    __tablename__ = "manual_scan_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    requested_by_chat_id: Mapped[str] = mapped_column(String(32))
+    requested_by_username: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Backtest(Base):
     __tablename__ = "backtests"
 
@@ -232,3 +323,68 @@ class Backtest(Base):
     expectancy: Mapped[float] = mapped_column(Float, default=0.0)
     max_drawdown: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Trade(Base):
+    """
+    Acompanhamento de uma operação hipotética nascida de um sinal
+    CONFIRMED (seções 77-106). NUNCA representa execução real — ver
+    `alphaquant_core.engines.trade_engine` para a lógica pura de
+    lifecycle/PnL/R que esta tabela persiste.
+
+    Separação SIGNAL vs TRADE (seção 96): `opportunity_id` é o SIGNAL
+    que originou esta TRADE; a Opportunity nunca é sobrescrita por
+    dados de acompanhamento de preço.
+    """
+    __tablename__ = "trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), index=True)
+
+    asset: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(8))
+    direction: Mapped[Direction] = mapped_column(Enum(Direction))
+    strategy_name: Mapped[str] = mapped_column(String(64), index=True)
+    strategy_version: Mapped[str] = mapped_column(String(16), default="v1.0")
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+
+    entry: Mapped[float] = mapped_column(Numeric(18, 8))
+    initial_stop: Mapped[float] = mapped_column(Numeric(18, 8))
+    stop: Mapped[float] = mapped_column(Numeric(18, 8))  # pode mover para breakeven (seção 90)
+    targets: Mapped[list] = mapped_column(JSON, default=list)  # [{price, exit_pct, rr, hit, hit_at, hit_price}]
+    move_to_breakeven_after_tp1: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    status: Mapped[TradeStatus] = mapped_column(Enum(TradeStatus), default=TradeStatus.OPEN, index=True)
+    result: Mapped[TradeResult | None] = mapped_column(Enum(TradeResult), nullable=True)
+    remaining_pct: Mapped[float] = mapped_column(Float, default=100.0)
+    realized_pnl_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    realized_r: Mapped[float] = mapped_column(Float, default=0.0)
+
+    last_price: Mapped[float | None] = mapped_column(Numeric(18, 8), nullable=True)
+    last_price_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Seção 85 — snapshot do MarketContext no instante do sinal, para
+    # responder "o que o AlphaQuant estava vendo quando gerou esse sinal?"
+    # sem depender dos dados atuais (que já mudaram).
+    context_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    opportunity: Mapped["Opportunity"] = relationship()
+    events: Mapped[list["TradeEvent"]] = relationship(back_populates="trade", order_by="TradeEvent.id")
+
+
+class TradeEvent(Base):
+    """Trilha de auditoria de UMA trade (seção 87): TRADE_CREATED,
+    PRICE_UPDATE, TP1_HIT, STOP_HIT, INVALIDATED, CLOSED, etc."""
+    __tablename__ = "trade_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(32))
+    price: Mapped[float] = mapped_column(Numeric(18, 8))
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    event_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    trade: Mapped["Trade"] = relationship(back_populates="events")

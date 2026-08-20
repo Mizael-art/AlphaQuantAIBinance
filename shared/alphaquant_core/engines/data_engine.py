@@ -12,7 +12,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Callable, Protocol
 
 import requests
 
@@ -39,7 +39,17 @@ MIN_REQUEST_INTERVAL_SECONDS = 0.25
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
-class BinanceRequestError(RuntimeError):
+class MarketDataError(RuntimeError):
+    """
+    Erro de rede, HTTP ou payload inesperado de qualquer fonte de dados
+    de mercado (Binance ou Bybit). Base comum introduzida ao adicionar o
+    `BybitMarketDataClient` (seção 3) para que quem já captura erros de
+    coleta (`except BinanceRequestError`/agora `except MarketDataError`)
+    continue funcionando sem precisar saber qual exchange está por trás.
+    """
+
+
+class BinanceRequestError(MarketDataError):
     """Erro de rede, HTTP ou payload inesperado da Binance."""
 
 
@@ -55,6 +65,19 @@ class Candle:
     low: float
     close: float
     volume: float
+
+
+class MarketDataClient(Protocol):
+    """
+    Interface estrutural compartilhada por `BinanceMarketDataClient` e
+    `BybitMarketDataClient` — quem só precisa buscar candles/preço não
+    depende de qual exchange está por trás (usado nos type hints de
+    `orchestrator.py`/`playbooks/runner.py`).
+    """
+
+    def get_klines(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]: ...
+    def get_ticker_price(self, symbol: str) -> float: ...
+    def get_depth(self, symbol: str, limit: int = 50) -> dict: ...
 
 
 class BinanceMarketDataClient:

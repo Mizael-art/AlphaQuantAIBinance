@@ -1,13 +1,13 @@
 """
-Analytics (Fase 12 — seções 21-22 do master prompt).
+Analytics (Fase 12 — seções 21-22 do master prompt; seção 10 da
+evolução Fase 4/7 — Market Intelligence horário).
 
-Resumo diário e relatório semanal, calculados exclusivamente a partir de
-`opportunities` já persistidas — nenhum dado de P&L/trade realizado é
-usado porque o sistema ainda não rastreia execução real de ordens (isso
-é explicitamente fora de escopo: o AlphaQuant X não envia ordens, seção
-1 do master prompt). Métricas que dependeriam disso (profit factor,
-expectância real) ficam para quando a Fase 13 (Backtest) e um eventual
-módulo de tracking de posições existirem.
+Resumo diário, relatório semanal e Market Intelligence horário,
+calculados exclusivamente a partir de `opportunities`/`scanner_events`
+já persistidas — nenhum dado de P&L/trade realizado é usado aqui (isso
+vive em `trade_service`/`trades`, seções 77-106). Métricas que
+dependeriam de execução real de ordens continuam fora de escopo (seção
+1: o AlphaQuant X não envia ordens).
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from alphaquant_core.db.models import Opportunity, OpportunityStatus
+from alphaquant_core.db.models import Opportunity, OpportunityStatus, ScannerEvent
 
 
 @dataclass(frozen=True)
@@ -171,6 +171,220 @@ def format_daily_summary_message(summary: DailySummary) -> str:
         "",
         "ALPHAQUANT X",
     ]
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class HourlyOpportunity:
+    asset: str
+    playbook: str
+    score: float
+    direction: str
+    status: str
+
+
+@dataclass(frozen=True)
+class HourlyRejection:
+    asset: str
+    playbook: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class HourlyIntelligence:
+    period_start: str
+    period_end: str
+    top_opportunities: list[HourlyOpportunity] = field(default_factory=list)
+    forming: list[HourlyOpportunity] = field(default_factory=list)
+    rejected: list[HourlyRejection] = field(default_factory=list)
+    data_unavailable_assets: list[str] = field(default_factory=list)
+
+
+def compute_hourly_intelligence(db: Session, now: datetime | None = None, window_minutes: int = 60) -> HourlyIntelligence:
+    """
+    Seção 10 — MARKET INTELLIGENCE. Mesma fonte de verdade do resumo
+    diário (`opportunities` já persistidas), só que numa janela de 1h
+    (`REPORT_INTERVAL_MINUTES`) em vez de 24h, com o TOP ranqueado por
+    score e as seções FORMING/REJECTED separadas (seção 55: setup ≠
+    sinal — nunca listar FORMATION como se fosse entrada).
+    """
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(minutes=window_minutes)
+
+    top_rows = db.execute(
+        select(Opportunity)
+        .where(Opportunity.updated_at.between(since, now), Opportunity.status == OpportunityStatus.CONFIRMED)
+        .order_by(Opportunity.score.desc())
+        .limit(5)
+    ).scalars().all()
+
+    forming_rows = db.execute(
+        select(Opportunity)
+        .where(Opportunity.updated_at.between(since, now), Opportunity.status == OpportunityStatus.FORMATION)
+        .order_by(Opportunity.score.desc())
+        .limit(5)
+    ).scalars().all()
+
+    rejected_rows = db.execute(
+        select(Opportunity)
+        .where(Opportunity.updated_at.between(since, now), Opportunity.status == OpportunityStatus.INVALIDATED)
+        .order_by(Opportunity.updated_at.desc())
+        .limit(3)
+    ).scalars().all()
+
+    unavailable_rows = db.execute(
+        select(ScannerEvent.asset)
+        .where(ScannerEvent.timestamp.between(since, now), ScannerEvent.event_type == "data_engine_error")
+        .distinct()
+        .limit(10)
+    ).scalars().all()
+
+    def _to_hourly(o: Opportunity) -> HourlyOpportunity:
+        return HourlyOpportunity(
+            asset=o.asset, playbook=o.playbook, score=float(o.score),
+            direction=o.direction.value, status=o.status.value,
+        )
+
+    def _to_rejection(o: Opportunity) -> HourlyRejection:
+        snapshot = o.audit_snapshot or {}
+        reasons = snapshot.get("quality_filter", {}).get("reasons", [])
+        reason = reasons[0] if reasons else "condições deixaram de ser atendidas"
+        return HourlyRejection(asset=o.asset, playbook=o.playbook, reason=reason)
+
+    return HourlyIntelligence(
+        period_start=since.isoformat(), period_end=now.isoformat(),
+        top_opportunities=[_to_hourly(o) for o in top_rows],
+        forming=[_to_hourly(o) for o in forming_rows],
+        rejected=[_to_rejection(o) for o in rejected_rows],
+        data_unavailable_assets=list(unavailable_rows),
+    )
+
+
+def format_hourly_intelligence_message(intel: HourlyIntelligence) -> str:
+    lines = [
+        "📊 ALPHAQUANT X — MARKET INTELLIGENCE",
+        "",
+        f"🕐 Última hora ({intel.period_start[11:16]} — {intel.period_end[11:16]} UTC)",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        "🔥 MELHORES OPORTUNIDADES",
+        "",
+    ]
+    if intel.top_opportunities:
+        lines += [
+            f"{i + 1}. {o.asset} — {o.playbook} — score {o.score:.0f} — {o.direction}"
+            for i, o in enumerate(intel.top_opportunities)
+        ]
+    else:
+        lines.append("Não foram encontradas entradas de alta qualidade nesta janela.")
+
+    lines += ["", "━━━━━━━━━━━━━━━━━━", "", "👀 SETUPS EM FORMAÇÃO", ""]
+    if intel.forming:
+        lines += [f"• {o.asset} — {o.playbook} — score {o.score:.0f}" for o in intel.forming]
+    else:
+        lines.append("Nenhum setup em formação relevante.")
+
+    if intel.data_unavailable_assets:
+        lines += ["", "━━━━━━━━━━━━━━━━━━", "", "⚠️ ATENÇÃO", ""]
+        lines.append("Dados indisponíveis nesta janela: " + ", ".join(intel.data_unavailable_assets))
+
+    lines += ["", "━━━━━━━━━━━━━━━━━━", "", "❌ REJEITADOS", ""]
+    if intel.rejected:
+        lines += [f"• {r.asset} — {r.playbook}: {r.reason}" for r in intel.rejected]
+    else:
+        lines.append("Nenhuma rejeição relevante nesta janela.")
+
+    lines += [
+        "", "━━━━━━━━━━━━━━━━━━", "",
+        "⚠️ Setup identificado ≠ garantia de resultado. Gestão de risco é obrigatória.",
+        "",
+        "ALPHAQUANT X",
+    ]
+    return "\n".join(lines)
+
+
+def compute_cycle_summary(db: Session, since: datetime, now: datetime | None = None) -> HourlyIntelligence:
+    """
+    Mesmo cálculo de `compute_hourly_intelligence`, mas com janela
+    explícita (o próprio ciclo de scan que acabou de rodar, seção 68 —
+    automático a cada SCAN_INTERVAL_MINUTES ou manual via /analisar) em
+    vez de uma janela fixa de 1h. Reaproveita `HourlyIntelligence` como
+    estrutura de dados porque a pergunta é a mesma: "o que apareceu
+    (ou não) nesta janela?".
+    """
+    now = now or datetime.now(timezone.utc)
+
+    top_rows = db.execute(
+        select(Opportunity)
+        .where(Opportunity.updated_at.between(since, now), Opportunity.status == OpportunityStatus.CONFIRMED)
+        .order_by(Opportunity.score.desc())
+        .limit(5)
+    ).scalars().all()
+
+    forming_rows = db.execute(
+        select(Opportunity)
+        .where(Opportunity.updated_at.between(since, now), Opportunity.status == OpportunityStatus.FORMATION)
+        .order_by(Opportunity.score.desc())
+        .limit(5)
+    ).scalars().all()
+
+    unavailable_rows = db.execute(
+        select(ScannerEvent.asset)
+        .where(ScannerEvent.timestamp.between(since, now), ScannerEvent.event_type == "data_engine_error")
+        .distinct()
+        .limit(10)
+    ).scalars().all()
+
+    def _to_hourly(o: Opportunity) -> HourlyOpportunity:
+        return HourlyOpportunity(
+            asset=o.asset, playbook=o.playbook, score=float(o.score),
+            direction=o.direction.value, status=o.status.value,
+        )
+
+    return HourlyIntelligence(
+        period_start=since.isoformat(), period_end=now.isoformat(),
+        top_opportunities=[_to_hourly(o) for o in top_rows],
+        forming=[_to_hourly(o) for o in forming_rows],
+        rejected=[],
+        data_unavailable_assets=list(unavailable_rows),
+    )
+
+
+def format_cycle_summary_message(intel: HourlyIntelligence, manual: bool, assets_scanned: int) -> str:
+    """
+    Enviada ao FIM de todo ciclo de scan (manual ou automático) — o
+    "e aí, achou alguma coisa?" que o usuário sempre recebe, mesmo
+    quando a resposta é "nada ainda". As oportunidades CONFIRMED/
+    FORMATION relevantes já saíram como mensagem própria (sinal/future,
+    seção 16/17) via `process_pending_alerts`; esta mensagem é só o
+    apanhado geral do ciclo, nunca duplica o conteúdo do sinal em si.
+    """
+    header = "✅ ANÁLISE MANUAL CONCLUÍDA" if manual else "✅ CICLO DE ANÁLISE CONCLUÍDO"
+    lines = [header, "", f"Ativos analisados: {assets_scanned}", "", "━━━━━━━━━━━━━━━━━━", ""]
+
+    has_something = bool(intel.top_opportunities or intel.forming)
+
+    if intel.top_opportunities:
+        lines += ["🎯 SINAIS CONFIRMADOS NESTE CICLO", ""]
+        lines += [
+            f"{i + 1}. {o.asset} — {o.playbook} — score {o.score:.0f} — {o.direction}"
+            for i, o in enumerate(intel.top_opportunities)
+        ]
+        lines += ["", "(mensagem de sinal detalhada enviada separadamente acima/abaixo)", ""]
+
+    if intel.forming:
+        lines += ["👀 FIQUE DE OLHO — setups em formação", ""]
+        lines += [f"• {o.asset} — {o.playbook} — score {o.score:.0f}" for o in intel.forming]
+        lines += [""]
+
+    if not has_something:
+        lines += ["Nada relevante por enquanto.", "Nenhum setup em formação ou confirmado neste ciclo.", ""]
+
+    if intel.data_unavailable_assets:
+        lines += ["⚠️ Dados indisponíveis para: " + ", ".join(intel.data_unavailable_assets), ""]
+
+    lines += ["━━━━━━━━━━━━━━━━━━", "", "ALPHAQUANT X"]
     return "\n".join(lines)
 
 

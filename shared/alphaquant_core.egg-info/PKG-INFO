@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: alphaquant-core
+Version: 0.1.0
+Summary: Modelos de banco e configuração compartilhados entre a API e o Worker do AlphaQuant X
+Requires-Python: >=3.11
+Requires-Dist: sqlalchemy>=2.0
+Requires-Dist: psycopg2-binary>=2.9
+Requires-Dist: pydantic-settings>=2.2
+Requires-Dist: pandas>=2.2
+Requires-Dist: numpy>=1.26
+Requires-Dist: requests>=2.32
+Requires-Dist: python-telegram-bot>=21.0

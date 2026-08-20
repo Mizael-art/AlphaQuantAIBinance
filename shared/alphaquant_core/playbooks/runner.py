@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from alphaquant_core.db.models import Opportunity
 from alphaquant_core.db.models import Playbook as PlaybookRow
-from alphaquant_core.engines.data_engine import BinanceMarketDataClient
+from alphaquant_core.engines.data_engine import MarketDataClient
 from alphaquant_core.engines.orchestrator import fetch_and_persist
 from alphaquant_core.engines.decision import make_decision
 from alphaquant_core.engines.quality_filter import (
@@ -49,7 +49,7 @@ def compute_htf_regime(
     db: Session,
     symbol: str,
     htf_timeframe: str | None,
-    client: BinanceMarketDataClient | None = None,
+    client: MarketDataClient | None = None,
     limit: int = 200,
 ) -> str | None:
     """
@@ -69,7 +69,7 @@ def scan_symbol(
     db: Session,
     symbol: str,
     timeframe: str,
-    client: BinanceMarketDataClient | None = None,
+    client: MarketDataClient | None = None,
     limit: int = 200,
     htf_regime: str | None = None,
 ) -> tuple[PlaybookContext, list[PlaybookResult]]:
@@ -100,7 +100,7 @@ def scan_and_score(
     db: Session,
     symbol: str,
     timeframe: str,
-    client: BinanceMarketDataClient | None = None,
+    client: MarketDataClient | None = None,
     limit: int = 200,
     htf_regime: str | None = None,
 ) -> tuple[PlaybookContext, list[PlaybookResult], list[Opportunity]]:

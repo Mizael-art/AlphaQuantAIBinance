@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from alphaquant_core.telegram.formatting import (
     format_future_message,
     format_invalidation_message,
+    format_scan_started_message,
     format_signal_message,
 )
 
@@ -123,3 +124,24 @@ def test_all_messages_are_plain_strings_safe_for_telegram():
         text = fn(opp)
         assert isinstance(text, str)
         assert len(text) > 0
+
+
+def test_scan_started_message_automatic_cycle():
+    text = format_scan_started_message(manual=False, symbols_count=87)
+    assert "ANALISANDO O MERCADO" in text
+    assert "87" in text
+    assert "manual" not in text.lower()
+
+
+def test_scan_started_message_manual_with_requester():
+    text = format_scan_started_message(manual=True, symbols_count=87, requested_by_username="joao")
+    assert "MANUAL" in text
+    assert "@joao" in text
+    assert "87" in text
+
+
+def test_scan_started_message_manual_without_requester_username():
+    # Update de canal, ou usuário sem @username público no Telegram.
+    text = format_scan_started_message(manual=True, symbols_count=10, requested_by_username=None)
+    assert "MANUAL" in text
+    assert "pedido manual" in text

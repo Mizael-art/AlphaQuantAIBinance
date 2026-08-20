@@ -2,9 +2,10 @@
 Orquestrador do Data Engine (Fase 3).
 
 Elimina a necessidade de screenshots: para cada ativo/timeframe, coleta
-candles públicos da Binance, persiste no banco, calcula indicadores e
-estrutura de mercado, e devolve um JSON padronizado — a mesma finalidade
-do [[alphaquant-engine]], agora alimentando o Worker 24/7 do AlphaQuant X.
+candles públicos da Bybit (fonte principal — seção 3), persiste no
+banco, calcula indicadores e estrutura de mercado, e devolve um JSON
+padronizado — a mesma finalidade do [[alphaquant-engine]], agora
+alimentando o Worker 24/7 do AlphaQuant X.
 """
 from __future__ import annotations
 
@@ -13,7 +14,8 @@ import logging
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from alphaquant_core.engines.data_engine import BinanceMarketDataClient, BinanceRequestError
+from alphaquant_core.engines.bybit_data_engine import BybitMarketDataClient
+from alphaquant_core.engines.data_engine import MarketDataClient, MarketDataError
 from alphaquant_core.engines.indicators import compute_indicators
 from alphaquant_core.engines.structure import current_regime, detect_structure_events, find_swings
 from alphaquant_core.services.candle_service import get_or_create_asset, upsert_candles
@@ -43,22 +45,25 @@ def fetch_and_persist(
     db: Session,
     symbol: str,
     timeframe: str,
-    client: BinanceMarketDataClient | None = None,
+    client: MarketDataClient | None = None,
     limit: int = 200,
 ) -> tuple[pd.DataFrame, list, int]:
     """
-    Etapa DATA compartilhada: busca candles na Binance, persiste no banco
-    (idempotente) e devolve o DataFrame pronto para qualquer consumidor
-    (Data Engine/`analyze_asset` ou o Playbook Engine) — evita buscar os
-    mesmos candles duas vezes no mesmo ciclo do Worker.
+    Etapa DATA compartilhada: busca candles na Bybit (fonte principal —
+    seção 3; `client` aceita qualquer `MarketDataClient`, incluindo o
+    `BinanceMarketDataClient` legado, para quem precisar comparar/fazer
+    fallback manual), persiste no banco (idempotente) e devolve o
+    DataFrame pronto para qualquer consumidor (Data Engine/`analyze_asset`
+    ou o Playbook Engine) — evita buscar os mesmos candles duas vezes no
+    mesmo ciclo do Worker.
 
-    Levanta BinanceRequestError se a coleta falhar.
+    Levanta MarketDataError se a coleta falhar.
     """
-    client = client or BinanceMarketDataClient()
+    client = client or BybitMarketDataClient()
 
     candles = client.get_klines(symbol=symbol, timeframe=timeframe, limit=limit)
     if not candles:
-        raise BinanceRequestError(f"nenhuma candle retornada para {symbol} {timeframe}")
+        raise MarketDataError(f"nenhuma candle retornada para {symbol} {timeframe}")
 
     asset = get_or_create_asset(db, symbol)
     stored = upsert_candles(db, asset.id, timeframe, candles)
@@ -71,14 +76,14 @@ def analyze_asset(
     db: Session,
     symbol: str,
     timeframe: str,
-    client: BinanceMarketDataClient | None = None,
+    client: MarketDataClient | None = None,
     limit: int = 200,
 ) -> dict:
     """
     Ciclo completo do Data Engine para um asset/timeframe:
     DATA -> persistência -> indicadores -> estrutura -> JSON padronizado.
 
-    Levanta BinanceRequestError se a coleta falhar — quem chama decide
+    Levanta MarketDataError se a coleta falhar — quem chama decide
     se registra em scanner_events e tenta novamente no próximo ciclo
     (nunca fabricar dados no lugar de uma falha de rede).
     """
