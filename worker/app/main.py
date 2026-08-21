@@ -40,7 +40,7 @@ from alphaquant_core.telegram.formatting import (
 )
 from alphaquant_core.telegram.queue import enqueue_alert, process_pending_alerts
 from alphaquant_core.telegram.summary import compute_cycle_summary, format_cycle_summary_message
-from app.scheduler import seconds_until_next_boundary
+from .scheduler import seconds_until_next_boundary
 
 logging.basicConfig(
     level=logging.INFO,
