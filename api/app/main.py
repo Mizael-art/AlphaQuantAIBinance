@@ -61,6 +61,8 @@ async def _run_embedded_worker():
             logger.error("Não foi possível importar o worker: %s", e)
             return
 
+    logger.info("[EMBEDDED_WORKER] import do módulo worker OK")
+
     from datetime import datetime, timezone
 
     from alphaquant_core.db.models import StrategyStatus
@@ -69,91 +71,126 @@ async def _run_embedded_worker():
     from alphaquant_core.telegram.formatting import format_scan_started_message, format_system_online_message
     from alphaquant_core.telegram.summary import compute_cycle_summary, format_cycle_summary_message
 
-    telegram_client = TelegramClient(bot_token=settings.TELEGRAM_BOT_TOKEN, test_mode=settings.TEST_MODE)
-
-    def _resolve_universe():
-        try:
-            from app.main import resolve_scan_universe
-        except ImportError:
-            from worker.app.main import resolve_scan_universe
-        return resolve_scan_universe(BybitMarketDataClient())
-
-    db = SessionLocal()
     try:
-        active_strategies = len(strategy_service.list_strategies(db, status=StrategyStatus.ACTIVE))
-    except Exception:
-        logger.exception("falha ao contar estratégias ativas para a mensagem de boot")
-        active_strategies = 0
-    finally:
-        db.close()
+        telegram_client = TelegramClient(bot_token=settings.TELEGRAM_BOT_TOKEN, test_mode=settings.TEST_MODE)
 
-    try:
-        symbols_count = await asyncio.to_thread(_resolve_universe)
-        symbols_count = len(symbols_count)
-    except Exception:
-        logger.exception("falha ao resolver universo de símbolos para a mensagem de boot")
-        symbols_count = 0
+        def _resolve_universe():
+            try:
+                from app.main import resolve_scan_universe
+            except ImportError:
+                from worker.app.main import resolve_scan_universe
+            return resolve_scan_universe(BybitMarketDataClient())
 
-    boot_text = format_system_online_message(active_strategies, symbols_count, settings.SCAN_INTERVAL_MINUTES)
-    boot_result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, boot_text)
-    if not boot_result.success:
-        logger.error("falha ao enviar mensagem de boot: %s", boot_result.error)
-
-    while True:
-        # `wait_for_next_cycle` faz polling curto de `manual_scan_requests`
-        # (comando /analisar do Telegram) enquanto espera o próximo
-        # fechamento de vela — roda numa thread pra não travar o event
-        # loop da API com os `time.sleep` internos.
-        manual, requested_by = await asyncio.to_thread(wait_for_next_cycle, SessionLocal, settings)
-        if manual:
-            logger.info("análise manual disparada via Telegram (/analisar) por %s", requested_by or "desconhecido")
-        else:
-            logger.info("scanner embutido: fechamento de vela de %sm atingido", settings.SCAN_INTERVAL_MINUTES)
-
-        cycle_started_at = datetime.now(timezone.utc)
+        logger.info("[EMBEDDED_WORKER] contando estratégias ativas...")
         db = SessionLocal()
         try:
-            from sqlalchemy import select
-            from alphaquant_core.db.models import SystemHealth
-
-            previous_row = db.execute(select(SystemHealth).where(SystemHealth.service == "worker")).scalar_one_or_none()
-            previous_status = previous_row.status if previous_row else None
-
-            started = time.monotonic()
-
-            symbols = await asyncio.to_thread(_resolve_universe)
-            started_text = format_scan_started_message(manual, len(symbols), requested_by)
-            started_result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, started_text)
-            if not started_result.success:
-                logger.error("falha ao enviar mensagem de início de ciclo: %s", started_result.error)
-
-            assets_scanned, opportunities_found, errors = await asyncio.to_thread(
-                run_scan_cycle, db, telegram_client, symbols,
-            )
-            _updated, trade_errors = await asyncio.to_thread(
-                run_trade_tracking_cycle, db, BybitMarketDataClient(), telegram_client,
-            )
-            errors += trade_errors
-
-            cycle_summary = await asyncio.to_thread(compute_cycle_summary, db, cycle_started_at)
-            summary_text = format_cycle_summary_message(cycle_summary, manual, assets_scanned)
-            summary_result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, summary_text)
-            if not summary_result.success:
-                logger.error("falha ao enviar resumo de ciclo: %s", summary_result.error)
-
-            latency_ms = (time.monotonic() - started) * 1000
-            await asyncio.to_thread(emit_heartbeat, db, assets_scanned, opportunities_found, errors, latency_ms)
-            await asyncio.to_thread(notify_health_transition, db, telegram_client, previous_status)
-        except Exception as exc:
-            logger.exception("Erro no ciclo do scanner embutido: %s", exc)
+            active_strategies = len(strategy_service.list_strategies(db, status=StrategyStatus.ACTIVE))
+        except Exception:
+            logger.exception("falha ao contar estratégias ativas para a mensagem de boot")
+            active_strategies = 0
         finally:
             db.close()
+        logger.info("[EMBEDDED_WORKER] estratégias ativas=%s", active_strategies)
+
+        logger.info("[EMBEDDED_WORKER] resolvendo universo de símbolos (chamada à Bybit)...")
+        try:
+            symbols_count = await asyncio.to_thread(_resolve_universe)
+            symbols_count = len(symbols_count)
+        except Exception:
+            logger.exception("falha ao resolver universo de símbolos para a mensagem de boot")
+            symbols_count = 0
+        logger.info("[EMBEDDED_WORKER] universo resolvido, symbols_count=%s", symbols_count)
+
+        boot_text = format_system_online_message(active_strategies, symbols_count, settings.SCAN_INTERVAL_MINUTES)
+        logger.info("[EMBEDDED_WORKER] enviando mensagem de boot ao Telegram...")
+        boot_result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, boot_text)
+        if not boot_result.success:
+            logger.error("falha ao enviar mensagem de boot: %s", boot_result.error)
+        else:
+            logger.info("[EMBEDDED_WORKER] mensagem de boot enviada, entrando no loop principal")
+    except Exception:
+        # Sem isto, qualquer exceção aqui mataria a Task silenciosamente:
+        # a Task fica referenciada em `lifespan` (nunca é coletada pelo GC
+        # enquanto o app roda), então o handler padrão do asyncio que
+        # loga "Task exception was never retrieved" nunca dispara.
+        logger.exception("[EMBEDDED_WORKER] falha fatal na inicialização — worker embutido NÃO vai rodar")
+        return
+
+    while True:
+        try:
+            # `wait_for_next_cycle` faz polling curto de `manual_scan_requests`
+            # (comando /analisar do Telegram) enquanto espera o próximo
+            # fechamento de vela — roda numa thread pra não travar o event
+            # loop da API com os `time.sleep` internos.
+            manual, requested_by = await asyncio.to_thread(wait_for_next_cycle, SessionLocal, settings)
+            if manual:
+                logger.info("análise manual disparada via Telegram (/analisar) por %s", requested_by or "desconhecido")
+            else:
+                logger.info("scanner embutido: fechamento de vela de %sm atingido", settings.SCAN_INTERVAL_MINUTES)
+
+            cycle_started_at = datetime.now(timezone.utc)
+            db = SessionLocal()
+            try:
+                from sqlalchemy import select
+                from alphaquant_core.db.models import SystemHealth
+
+                previous_row = db.execute(select(SystemHealth).where(SystemHealth.service == "worker")).scalar_one_or_none()
+                previous_status = previous_row.status if previous_row else None
+
+                started = time.monotonic()
+
+                symbols = await asyncio.to_thread(_resolve_universe)
+                started_text = format_scan_started_message(manual, len(symbols), requested_by)
+                started_result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, started_text)
+                if not started_result.success:
+                    logger.error("falha ao enviar mensagem de início de ciclo: %s", started_result.error)
+
+                assets_scanned, opportunities_found, errors = await asyncio.to_thread(
+                    run_scan_cycle, db, telegram_client, symbols,
+                )
+                _updated, trade_errors = await asyncio.to_thread(
+                    run_trade_tracking_cycle, db, BybitMarketDataClient(), telegram_client,
+                )
+                errors += trade_errors
+
+                cycle_summary = await asyncio.to_thread(compute_cycle_summary, db, cycle_started_at)
+                summary_text = format_cycle_summary_message(cycle_summary, manual, assets_scanned)
+                summary_result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, summary_text)
+                if not summary_result.success:
+                    logger.error("falha ao enviar resumo de ciclo: %s", summary_result.error)
+
+                latency_ms = (time.monotonic() - started) * 1000
+                await asyncio.to_thread(emit_heartbeat, db, assets_scanned, opportunities_found, errors, latency_ms)
+                await asyncio.to_thread(notify_health_transition, db, telegram_client, previous_status)
+            finally:
+                db.close()
+        except Exception:
+            # Segunda camada de proteção: qualquer exceção não prevista
+            # aqui (inclusive fora do `db = SessionLocal()` acima, como
+            # falha no próprio `wait_for_next_cycle`) não pode derrubar
+            # a Task silenciosamente — loga e tenta de novo no próximo
+            # ciclo, em vez de matar o worker embutido pro resto da vida
+            # do processo.
+            logger.exception("[EMBEDDED_WORKER] erro não tratado no ciclo — worker segue vivo, tentando de novo")
+            await asyncio.sleep(30)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Inicia o scanner embutido em background no plano Free do Render
     worker_task = asyncio.create_task(_run_embedded_worker())
+
+    def _log_worker_task_exception(task: asyncio.Task) -> None:
+        # Rede de segurança final: sem isto, uma exceção que escape de
+        # TODOS os try/except de `_run_embedded_worker` mataria a Task
+        # sem deixar nenhum rastro no log (ver comentário na função).
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("[EMBEDDED_WORKER] Task morreu com exceção não tratada", exc_info=exc)
+
+    worker_task.add_done_callback(_log_worker_task_exception)
     yield
     worker_task.cancel()
 
