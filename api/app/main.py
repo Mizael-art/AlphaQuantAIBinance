@@ -103,7 +103,7 @@ async def _run_embedded_worker():
 
         boot_text = format_system_online_message(active_strategies, symbols_count, settings.SCAN_INTERVAL_MINUTES)
         logger.info("[EMBEDDED_WORKER] enviando mensagem de boot ao Telegram...")
-        boot_result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, boot_text)
+        boot_result = await asyncio.to_thread(telegram_client.send_message, settings.TELEGRAM_SIGNALS_CHAT_ID, boot_text)
         if not boot_result.success:
             logger.error("falha ao enviar mensagem de boot: %s", boot_result.error)
         else:
@@ -141,7 +141,7 @@ async def _run_embedded_worker():
 
                 symbols = await asyncio.to_thread(_resolve_universe)
                 started_text = format_scan_started_message(manual, len(symbols), requested_by)
-                started_result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, started_text)
+                started_result = await asyncio.to_thread(telegram_client.send_message, settings.TELEGRAM_SIGNALS_CHAT_ID, started_text)
                 if not started_result.success:
                     logger.error("falha ao enviar mensagem de início de ciclo: %s", started_result.error)
 
@@ -155,7 +155,7 @@ async def _run_embedded_worker():
 
                 cycle_summary = await asyncio.to_thread(compute_cycle_summary, db, cycle_started_at)
                 summary_text = format_cycle_summary_message(cycle_summary, manual, assets_scanned)
-                summary_result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, summary_text)
+                summary_result = await asyncio.to_thread(telegram_client.send_message, settings.TELEGRAM_SIGNALS_CHAT_ID, summary_text)
                 if not summary_result.success:
                     logger.error("falha ao enviar resumo de ciclo: %s", summary_result.error)
 
