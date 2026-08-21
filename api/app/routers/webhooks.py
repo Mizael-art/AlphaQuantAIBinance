@@ -21,10 +21,21 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from alphaquant_core.core.config import get_settings
-from alphaquant_core.db.models import ScannerEvent
+from alphaquant_core.db.models import Opportunity, ScannerEvent, SystemHealth
 from alphaquant_core.db.session import get_db
 from alphaquant_core.services.manual_scan_service import request_manual_scan
+from alphaquant_core.services.trade_service import list_closed_trades, list_open_trades
 from alphaquant_core.telegram.client import TelegramClient
+from alphaquant_core.telegram.formatting import (
+    format_closed_trades_message,
+    format_help_message,
+    format_open_trades_message,
+    format_opportunities_list_message,
+    format_setups_forming_message,
+    format_status_message,
+)
+from alphaquant_core.telegram.summary import compute_daily_summary, format_daily_summary_message
+from sqlalchemy import select
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 logger = logging.getLogger("alphaquant.webhooks.telegram")
@@ -92,11 +103,15 @@ async def telegram_webhook(
 ) -> dict:
     """
     Recebe os `updates` do Telegram (configurado via `setWebhook`, ver
-    docs/DEPLOY.md). Hoje só entende o comando manual de análise
-    (`/analisar`, `/scan` ou `/analyze`), enviado no grupo do bot:
-    grava um `ManualScanRequest` que o Worker/scanner embutido consome
-    no próximo poll (`wait_for_next_cycle`), interrompendo a espera do
-    ciclo agendado e rodando a análise na hora.
+    docs/DEPLOY.md). Dois grupos de comando (seção 43):
+
+    - `/analisar` (ou `/scan`, `/analyze`): grava um `ManualScanRequest`
+      que o Worker/scanner embutido consome no próximo poll
+      (`wait_for_next_cycle`), interrompendo a espera do ciclo agendado.
+    - Comandos de leitura (`/relatorio`, `/status`, `/oportunidades`,
+      `/setups`, `/abertas`, `/historico`, `/help`): respondem na hora
+      com dados reais já persistidos (`_handle_info_command`), mesma
+      fonte de dados usada pelo Dashboard.
 
     Sempre responde 200 rapidamente (mesmo para updates que ignora) —
     é o que o Telegram espera para não ficar reentregando o update.
@@ -118,24 +133,43 @@ async def telegram_webhook(
         return {"ok": True}
 
     command = text.split()[0].split("@")[0].lower()
-    if command not in MANUAL_SCAN_COMMANDS:
+
+    INFO_COMMANDS = {
+        "/relatorio", "/report",
+        "/status",
+        "/oportunidades", "/opportunities",
+        "/setups",
+        "/abertas", "/open",
+        "/historico", "/history",
+        "/help", "/ajuda", "/start",
+    }
+
+    if command not in MANUAL_SCAN_COMMANDS and command not in INFO_COMMANDS:
         return {"ok": True}
 
     if not _is_authorized_chat(chat_id, settings):
-        logger.warning("comando /analisar recebido de chat não autorizado chat_id=%s", chat_id)
+        logger.warning("comando %s recebido de chat não autorizado chat_id=%s", command, chat_id)
         client = TelegramClient(bot_token=settings.TELEGRAM_BOT_TOKEN, test_mode=settings.TEST_MODE)
         # send_message é síncrono e usa asyncio.run() por baixo — rodar
         # direto aqui quebraria com "cannot be called from a running
         # event loop" (este endpoint já roda dentro do loop do Uvicorn).
         await asyncio.to_thread(
-            client.send_message, chat_id, "⚠️ Este chat não está autorizado a disparar análises do ALPHAQUANT X.",
+            client.send_message, chat_id, "⚠️ Este chat não está autorizado a interagir com o ALPHAQUANT X.",
         )
+        return {"ok": True}
+
+    client = TelegramClient(bot_token=settings.TELEGRAM_BOT_TOKEN, test_mode=settings.TEST_MODE)
+
+    if command in INFO_COMMANDS:
+        text_out = _handle_info_command(command, db, settings)
+        result = await asyncio.to_thread(client.send_message, chat_id, text_out)
+        if not result.success:
+            logger.error("falha ao responder comando %s: %s", command, result.error)
         return {"ok": True}
 
     request_manual_scan(db, chat_id=chat_id, username=username)
     logger.info("análise manual enfileirada por chat_id=%s username=%s", chat_id, username)
 
-    client = TelegramClient(bot_token=settings.TELEGRAM_BOT_TOKEN, test_mode=settings.TEST_MODE)
     ack_result = await asyncio.to_thread(
         client.send_message, chat_id, "🔍 Pedido recebido. Iniciando análise do mercado...",
     )
@@ -143,3 +177,48 @@ async def telegram_webhook(
         logger.error("falha ao enviar confirmação de /analisar: %s", ack_result.error)
 
     return {"ok": True}
+
+
+def _handle_info_command(command: str, db: Session, settings) -> str:
+    """
+    Comandos de leitura da seção 43 (`/relatorio`, `/status`,
+    `/oportunidades`, `/setups`, `/abertas`, `/historico`, `/help`) —
+    todos respondem com dados reais já persistidos, reaproveitando as
+    mesmas funções que alimentam o Dashboard (seção 44: fonte única de
+    dados entre Telegram e Dashboard).
+    """
+    if command in ("/relatorio", "/report"):
+        summary = compute_daily_summary(db)
+        return format_daily_summary_message(summary)
+
+    if command == "/status":
+        worker_row = db.execute(select(SystemHealth).where(SystemHealth.service == "worker")).scalar_one_or_none()
+        return format_status_message(worker_row, settings)
+
+    if command in ("/oportunidades", "/opportunities"):
+        rows = db.execute(
+            select(Opportunity)
+            .where(Opportunity.status != "INVALIDATED")
+            .order_by(Opportunity.score.desc())
+            .limit(5)
+        ).scalars().all()
+        return format_opportunities_list_message(rows)
+
+    if command == "/setups":
+        rows = db.execute(
+            select(Opportunity)
+            .where(Opportunity.status == "FORMATION")
+            .order_by(Opportunity.score.desc())
+            .limit(10)
+        ).scalars().all()
+        return format_setups_forming_message(rows)
+
+    if command in ("/abertas", "/open"):
+        trades = list_open_trades(db)
+        return format_open_trades_message(trades)
+
+    if command in ("/historico", "/history"):
+        trades = list_closed_trades(db)[:10]
+        return format_closed_trades_message(trades)
+
+    return format_help_message()
