@@ -254,7 +254,7 @@ def run_scan_cycle(
                         "OPPORTUNITY symbol=%s timeframe=%s playbook=%s direction=%s score=%.1f rr=%s "
                         "entry=%s stop=%s decision=%s status=%s",
                         symbol, timeframe, opp.playbook, opp.direction.value, opp.score, opp.rr, opp.entry, opp.stop,
-                        opp.decision.value, opp.status.value,
+                        opp.decision.value if opp.decision is not None else None, opp.status.value,
                     )
                     alert_type = decide_alert(db, opp)
                     if alert_type is not None:
