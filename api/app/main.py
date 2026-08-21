@@ -13,10 +13,15 @@ from alphaquant_core.db.session import SessionLocal
 from alphaquant_core.telegram.client import TelegramClient
 from app.routers import auth, backtests, health, market_data, opportunities, playbooks, strategies, summary, webhooks
 
-# Adiciona o diretório do worker ao sys.path para reutilizar a função de scan
-worker_path = Path(__file__).resolve().parent.parent.parent / "worker"
-if str(worker_path) not in sys.path:
-    sys.path.insert(0, str(worker_path))
+# Adiciona a raiz do repositório ao sys.path para reutilizar a função de
+# scan via `from worker.app.main import ...`. IMPORTANTE: precisa ser a
+# raiz do repo (que CONTÉM a pasta worker/), não a própria pasta worker/ —
+# senão o import de "worker.app.main" falha com
+# "ModuleNotFoundError: No module named 'worker'", pois o Python procura
+# um pacote "worker" dentro do próprio diretório worker/, que não existe.
+repo_root = Path(__file__).resolve().parent.parent.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 
 logger = logging.getLogger("alphaquant.api")
 settings = get_settings()
@@ -187,4 +192,3 @@ def root() -> dict:
         "test_mode": settings.TEST_MODE,
         "embedded_worker": True,
     }
-
