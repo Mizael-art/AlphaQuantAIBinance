@@ -18,7 +18,7 @@ services:
       - key: TEST_MODE
         value: "true"   # trocar para "false" após validar alertas no Telegram
       - key: SCAN_ASSETS
-        value: "BTCUSDT,ETHUSDT"
+        value: "AUTO"   # descoberta dinâmica: 50-100 USDT perpetuals da Bybit por liquidez (MIN/MAX_SYMBOLS em config.py)
       - key: SCAN_TIMEFRAMES
         value: "15m,1h,4h"
       - key: DATABASE_URL
