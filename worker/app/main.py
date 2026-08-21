@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -39,7 +39,14 @@ from alphaquant_core.telegram.formatting import (
     format_trade_update_message,
 )
 from alphaquant_core.telegram.queue import enqueue_alert, process_pending_alerts
-from alphaquant_core.telegram.summary import compute_cycle_summary, format_cycle_summary_message
+from alphaquant_core.telegram.summary import (
+    compute_cycle_summary,
+    compute_daily_summary,
+    compute_hourly_intelligence,
+    format_cycle_summary_message,
+    format_daily_summary_message,
+    format_hourly_intelligence_message,
+)
 from .scheduler import seconds_until_next_boundary
 
 logging.basicConfig(
@@ -63,6 +70,65 @@ def emit_heartbeat(db: Session, assets_scanned: int, opportunities_found: int, e
         "heartbeat assets_scanned=%s opportunities_found=%s errors=%s latency_ms=%.1f",
         assets_scanned, opportunities_found, errors, latency_ms,
     )
+
+
+def _report_due(db: Session, report_key: str, interval: timedelta) -> bool:
+    row = db.execute(select(SystemHealth).where(SystemHealth.service == report_key)).scalar_one_or_none()
+    if row is None or row.last_heartbeat is None:
+        return True
+    last = row.last_heartbeat
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - last >= interval
+
+
+def _mark_report_sent(db: Session, report_key: str) -> None:
+    row = db.execute(select(SystemHealth).where(SystemHealth.service == report_key)).scalar_one_or_none()
+    if row is None:
+        row = SystemHealth(service=report_key)
+        db.add(row)
+    row.status = "SENT"
+    row.last_heartbeat = datetime.now(timezone.utc)
+    db.commit()
+
+
+def maybe_send_periodic_reports(db: Session, telegram_client: TelegramClient, settings) -> None:
+    """
+    Relatório horário (seção 13/41) e diário (seção 30/42) — a lógica de
+    cálculo já existia pronta (`compute_hourly_intelligence`,
+    `compute_daily_summary`) desde as Fases 12/21, só nunca tinha sido
+    ligada em lugar nenhum porque dependia de um Render Cron Job
+    separado (serviço pago). Chamado a cada ciclo do worker embutido —
+    como o ciclo roda a cada `SCAN_INTERVAL_MINUTES` (15min por padrão),
+    a checagem por timestamp em `_report_due` garante que o relatório só
+    dispara de fato quando o intervalo (1h / 1 dia) realmente passou,
+    sem precisar de um processo separado.
+    """
+    if _report_due(db, "hourly_report", timedelta(minutes=settings.REPORT_INTERVAL_MINUTES)):
+        try:
+            intel = compute_hourly_intelligence(db, window_minutes=settings.REPORT_INTERVAL_MINUTES)
+            text = format_hourly_intelligence_message(intel)
+            result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, text)
+            if result.success:
+                logger.info("market intelligence horário enviado, message_id=%s", result.message_id)
+                _mark_report_sent(db, "hourly_report")
+            else:
+                logger.error("falha ao enviar market intelligence horário: %s", result.error)
+        except Exception:
+            logger.exception("falha ao calcular/enviar relatório horário")
+
+    if _report_due(db, "daily_report", timedelta(days=1)):
+        try:
+            summary = compute_daily_summary(db)
+            text = format_daily_summary_message(summary)
+            result = telegram_client.send_message(settings.TELEGRAM_SIGNALS_CHAT_ID, text)
+            if result.success:
+                logger.info("resumo diário enviado, message_id=%s", result.message_id)
+                _mark_report_sent(db, "daily_report")
+            else:
+                logger.error("falha ao enviar resumo diário: %s", result.error)
+        except Exception:
+            logger.exception("falha ao calcular/enviar relatório diário")
 
 
 def _worker_health_status(db: Session) -> str | None:
@@ -226,6 +292,24 @@ def run_scan_cycle(
     opportunities_found = 0
     errors = 0
 
+    # Estatísticas do ciclo (pedido explícito: nunca terminar um ciclo
+    # mostrando "0 oportunidades" sem dar pra saber quantos ativos foram
+    # analisados e por que não passaram). Nomenclatura mapeada para o que
+    # a arquitetura atual (scan em passe único, sem fase broad/deep
+    # separada) realmente produz: `total_confirmed` = status CONFIRMED,
+    # `total_wait_trigger` = decision ESPERAR, `total_setups_forming` =
+    # FORMATION sem decisão ainda, `total_rejected`/`total_invalidated`
+    # = decision REPROVAR (por status).
+    cycle_stats = {
+        "total_assets_discovered": len(symbols),
+        "total_assets_analyzed": 0,
+        "total_confirmed": 0,
+        "total_wait_trigger": 0,
+        "total_setups_forming": 0,
+        "total_rejected": 0,
+        "total_invalidated": 0,
+    }
+
     for symbol in symbols:
         htf_regime_cache: dict[str, str | None] = {}
 
@@ -243,6 +327,7 @@ def run_scan_cycle(
 
                 ctx, results, opportunities = scan_and_score(db, symbol, timeframe, client=client, htf_regime=htf_regime)
                 assets_scanned += 1
+                cycle_stats["total_assets_analyzed"] += 1
                 opportunities_found += len(opportunities)
                 matched = [r for r in results if r.matched]
                 logger.info(
@@ -256,6 +341,36 @@ def run_scan_cycle(
                         symbol, timeframe, opp.playbook, opp.direction.value, opp.score, opp.rr, opp.entry, opp.stop,
                         opp.decision.value if opp.decision is not None else None, opp.status.value,
                     )
+
+                    if opp.status.value == "CONFIRMED":
+                        cycle_stats["total_confirmed"] += 1
+                    elif opp.decision is not None and opp.decision.value == "ESPERAR":
+                        cycle_stats["total_wait_trigger"] += 1
+                    elif opp.decision is not None and opp.decision.value == "REPROVAR":
+                        if opp.status.value == "INVALIDATED":
+                            cycle_stats["total_invalidated"] += 1
+                        else:
+                            cycle_stats["total_rejected"] += 1
+                    else:
+                        cycle_stats["total_setups_forming"] += 1
+
+                    if opp.status.value != "CONFIRMED":
+                        # motivos já persistidos pelo Quality Filter / Decision
+                        # Engine (opportunity_service.upsert_opportunity) —
+                        # aqui só formata pra log estruturado, sem recalcular
+                        # nem inventar nada.
+                        snapshot = opp.audit_snapshot or {}
+                        reasons = (
+                            snapshot.get("decision_engine", {}).get("reasons")
+                            or snapshot.get("quality_filter", {}).get("reasons")
+                            or []
+                        )
+                        reason_text = "; ".join(reasons) if reasons else "sem motivo registrado ainda (setup em formação inicial)"
+                        logger.info(
+                            "%s\nSTATUS: %s\nSCORE: %.1f\nREASON:\n%s",
+                            f"{symbol} {timeframe} {opp.playbook}", opp.status.value, opp.score, reason_text,
+                        )
+
                     alert_type = decide_alert(db, opp)
                     if alert_type is not None:
                         enqueue_alert(db, opp, alert_type)
@@ -282,6 +397,15 @@ def run_scan_cycle(
     sent, failed = process_pending_alerts(db, telegram_client)
     if sent or failed:
         logger.info("telegram queue processed sent=%s failed=%s", sent, failed)
+
+    logger.info(
+        "CYCLE STATS assets_discovered=%s assets_analyzed=%s confirmed=%s wait_trigger=%s "
+        "setups_forming=%s rejected=%s invalidated=%s errors=%s",
+        cycle_stats["total_assets_discovered"], cycle_stats["total_assets_analyzed"],
+        cycle_stats["total_confirmed"], cycle_stats["total_wait_trigger"],
+        cycle_stats["total_setups_forming"], cycle_stats["total_rejected"],
+        cycle_stats["total_invalidated"], errors,
+    )
 
     return assets_scanned, opportunities_found, errors
 
@@ -363,6 +487,7 @@ def main() -> None:
             latency_ms = (time.monotonic() - started) * 1000
             emit_heartbeat(db, assets_scanned, opportunities_found, errors, latency_ms)
             notify_health_transition(db, telegram_client, previous_status)
+            maybe_send_periodic_reports(db, telegram_client, settings)
         except Exception:
             logger.exception("scan cycle failed")
         finally:
