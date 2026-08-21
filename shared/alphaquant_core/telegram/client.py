@@ -34,7 +34,7 @@ class SendResult:
 
 class TelegramClient:
     def __init__(self, bot_token: str, test_mode: bool = True, rate_limiter: RateLimiter | None = None) -> None:
-        self._bot = Bot(token=bot_token)
+        self._bot_token = bot_token
         self.test_mode = test_mode
         self._rate_limiter = rate_limiter or RateLimiter(MIN_SEND_INTERVAL_SECONDS)
 
@@ -42,7 +42,15 @@ class TelegramClient:
         self._rate_limiter.wait()
         payload = f"🧪 TEST MODE\n\n{text}" if self.test_mode else text
         try:
-            result = asyncio.run(self._bot.send_message(chat_id=chat_id, text=payload))
+            # Bot novo a cada chamada (não reaproveita self._bot): o Bot do
+            # python-telegram-bot guarda internamente um cliente HTTP preso
+            # ao event loop em que foi usado pela primeira vez. Como cada
+            # chamada roda seu próprio `asyncio.run()` (loop novo, fechado
+            # ao final), reaproveitar o mesmo Bot entre chamadas eventualmente
+            # reutiliza um cliente HTTP preso a um loop já fechado e quebra
+            # com "RuntimeError: Event loop is closed".
+            bot = Bot(token=self._bot_token)
+            result = asyncio.run(bot.send_message(chat_id=chat_id, text=payload))
             return SendResult(success=True, message_id=str(result.message_id))
         except TelegramError as exc:
             logger.error("falha ao enviar mensagem Telegram para chat_id=%s: %s", chat_id, exc)
