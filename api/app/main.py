@@ -43,6 +43,7 @@ async def _run_embedded_worker():
     try:
         from app.main import (
             emit_heartbeat,
+            maybe_send_periodic_reports,
             notify_health_transition,
             run_scan_cycle,
             run_trade_tracking_cycle,
@@ -52,6 +53,7 @@ async def _run_embedded_worker():
         try:
             from worker.app.main import (
                 emit_heartbeat,
+                maybe_send_periodic_reports,
                 notify_health_transition,
                 run_scan_cycle,
                 run_trade_tracking_cycle,
@@ -162,6 +164,7 @@ async def _run_embedded_worker():
                 latency_ms = (time.monotonic() - started) * 1000
                 await asyncio.to_thread(emit_heartbeat, db, assets_scanned, opportunities_found, errors, latency_ms)
                 await asyncio.to_thread(notify_health_transition, db, telegram_client, previous_status)
+                await asyncio.to_thread(maybe_send_periodic_reports, db, telegram_client, settings)
             finally:
                 db.close()
         except Exception:
