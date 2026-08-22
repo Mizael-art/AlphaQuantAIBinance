@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     SCAN_TIMEFRAMES: str = "15m,1h,4h"
     MIN_SYMBOLS: int = 50
     MAX_SYMBOLS: int = 100
+    # Quantos símbolos escanear em paralelo por ciclo (ThreadPoolExecutor
+    # em run_scan_cycle). Sequencial, 100 símbolos levavam 15-20min de
+    # parede — tempo suficiente pro Render Free suspender a instância no
+    # meio do ciclo por falta de tráfego HTTP.
+    SCAN_CONCURRENCY: int = 8
     SCAN_INTERVAL_MINUTES: int = 15
     REPORT_INTERVAL_MINUTES: int = 60
 
@@ -96,4 +101,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-
