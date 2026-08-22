@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -211,7 +212,105 @@ def run_trade_tracking_cycle(db: Session, client: BybitMarketDataClient, telegra
     return updated, errors
 
 
-def resolve_scan_universe(client: BybitMarketDataClient) -> list[str]:
+def _scan_one_symbol(symbol: str, settings) -> dict:
+    """
+    Todo o trabalho de UM símbolo, isolado numa sessão de banco e num
+    client Bybit próprios — Session do SQLAlchemy e requests.Session não
+    são seguros pra compartilhar entre threads, então cada worker do
+    ThreadPoolExecutor (`run_scan_cycle`) precisa dos seus próprios.
+    Retorna um dict com os contadores/eventos desse símbolo; quem chama
+    funde tudo depois que todas as threads terminam.
+    """
+    db = SessionLocal()
+    client = BybitMarketDataClient()
+    stats = {
+        "assets_analyzed": 0, "opportunities_found": 0, "errors": 0,
+        "confirmed": 0, "wait_trigger": 0, "setups_forming": 0, "rejected": 0, "invalidated": 0,
+        "alerts_enqueued": [],  # [(opp_id, alert_type)] só para log/contagem — enqueue já commitado aqui dentro
+    }
+    try:
+        htf_regime_cache: dict[str, str | None] = {}
+
+        for timeframe in settings.scan_timeframes:
+            lock_key = f"scan:{symbol}:{timeframe}"
+            if not try_acquire_lock(db, lock_key):
+                logger.info("scan skip (locked by outro processo) symbol=%s timeframe=%s", symbol, timeframe)
+                continue
+
+            try:
+                htf_tf = htf_timeframe_for(timeframe)
+                if htf_tf is not None and htf_tf not in htf_regime_cache:
+                    htf_regime_cache[htf_tf] = compute_htf_regime(db, symbol, htf_tf, client=client)
+                htf_regime = htf_regime_cache.get(htf_tf) if htf_tf else None
+
+                ctx, results, opportunities = scan_and_score(db, symbol, timeframe, client=client, htf_regime=htf_regime)
+                stats["assets_analyzed"] += 1
+                stats["opportunities_found"] += len(opportunities)
+                matched = [r for r in results if r.matched]
+                logger.info(
+                    "scan ok symbol=%s timeframe=%s regime=%s htf_regime=%s playbooks_matched=%s",
+                    symbol, timeframe, ctx.regime, htf_regime, [r.playbook for r in matched],
+                )
+                for opp in opportunities:
+                    logger.info(
+                        "OPPORTUNITY symbol=%s timeframe=%s playbook=%s direction=%s score=%.1f rr=%s "
+                        "entry=%s stop=%s decision=%s status=%s",
+                        symbol, timeframe, opp.playbook, opp.direction.value, opp.score, opp.rr, opp.entry, opp.stop,
+                        opp.decision.value if opp.decision is not None else None, opp.status.value,
+                    )
+
+                    if opp.status.value == "CONFIRMED":
+                        stats["confirmed"] += 1
+                    elif opp.decision is not None and opp.decision.value == "ESPERAR":
+                        stats["wait_trigger"] += 1
+                    elif opp.decision is not None and opp.decision.value == "REPROVAR":
+                        if opp.status.value == "INVALIDATED":
+                            stats["invalidated"] += 1
+                        else:
+                            stats["rejected"] += 1
+                    else:
+                        stats["setups_forming"] += 1
+
+                    if opp.status.value != "CONFIRMED":
+                        snapshot = opp.audit_snapshot or {}
+                        reasons = (
+                            snapshot.get("decision_engine", {}).get("reasons")
+                            or snapshot.get("quality_filter", {}).get("reasons")
+                            or []
+                        )
+                        reason_text = "; ".join(reasons) if reasons else "sem motivo registrado ainda (setup em formação inicial)"
+                        logger.info(
+                            "%s\nSTATUS: %s\nSCORE: %.1f\nREASON:\n%s",
+                            f"{symbol} {timeframe} {opp.playbook}", opp.status.value, opp.score, reason_text,
+                        )
+
+                    alert_type = decide_alert(db, opp)
+                    if alert_type is not None:
+                        enqueue_alert(db, opp, alert_type)
+                        stats["alerts_enqueued"].append((opp.id, alert_type.value))
+                        logger.info(
+                            "alert enqueued symbol=%s timeframe=%s playbook=%s alert_type=%s",
+                            symbol, timeframe, opp.playbook, alert_type.value,
+                        )
+            except MarketDataError as exc:
+                stats["errors"] += 1
+                logger.error("falha ao coletar %s %s: %s", symbol, timeframe, exc)
+                db.add(ScannerEvent(
+                    event_type="data_engine_error",
+                    asset=symbol,
+                    payload={"timeframe": timeframe, "error": str(exc)},
+                ))
+                db.commit()
+            except Exception:
+                stats["errors"] += 1
+                logger.exception("erro inesperado no ciclo de %s %s", symbol, timeframe)
+                db.rollback()
+            finally:
+                release_lock(db, lock_key)
+    finally:
+        db.close()
+
+    return stats
     """
     Seção 4 — universo de moedas. `SCAN_ASSETS=AUTO` (novo modo, opt-in —
     o padrão continua sendo a lista manual existente, para não mudar o
@@ -284,9 +383,8 @@ def run_scan_cycle(
     `resolve_scan_universe` — opt-in com `SCAN_ASSETS=AUTO`).
     """
     settings = get_settings()
-    client = BybitMarketDataClient()
     if symbols is None:
-        symbols = resolve_scan_universe(client)
+        symbols = resolve_scan_universe(BybitMarketDataClient())
 
     assets_scanned = 0
     opportunities_found = 0
@@ -310,89 +408,33 @@ def run_scan_cycle(
         "total_invalidated": 0,
     }
 
-    for symbol in symbols:
-        htf_regime_cache: dict[str, str | None] = {}
-
-        for timeframe in settings.scan_timeframes:
-            lock_key = f"scan:{symbol}:{timeframe}"
-            if not try_acquire_lock(db, lock_key):
-                logger.info("scan skip (locked by outro processo) symbol=%s timeframe=%s", symbol, timeframe)
-                continue
-
+    # Scan por símbolo em paralelo (pool limitado): sequencial, 100
+    # símbolos x 4 timeframes facilmente passava de 15-20min de parede —
+    # tempo mais que suficiente pro Render (Free) suspender a instância
+    # no meio do ciclo por falta de tráfego HTTP, sem log de erro nenhum
+    # (o processo simplesmente para de existir). `SCAN_CONCURRENCY`
+    # controla o paralelismo (default 8 — Bybit tolera isso tranquilo,
+    # mas fica configurável caso apareça rate limit em produção).
+    with ThreadPoolExecutor(max_workers=settings.SCAN_CONCURRENCY) as pool:
+        futures = {pool.submit(_scan_one_symbol, symbol, settings): symbol for symbol in symbols}
+        for future in as_completed(futures):
+            symbol = futures[future]
             try:
-                htf_tf = htf_timeframe_for(timeframe)
-                if htf_tf is not None and htf_tf not in htf_regime_cache:
-                    htf_regime_cache[htf_tf] = compute_htf_regime(db, symbol, htf_tf, client=client)
-                htf_regime = htf_regime_cache.get(htf_tf) if htf_tf else None
-
-                ctx, results, opportunities = scan_and_score(db, symbol, timeframe, client=client, htf_regime=htf_regime)
-                assets_scanned += 1
-                cycle_stats["total_assets_analyzed"] += 1
-                opportunities_found += len(opportunities)
-                matched = [r for r in results if r.matched]
-                logger.info(
-                    "scan ok symbol=%s timeframe=%s regime=%s htf_regime=%s playbooks_matched=%s",
-                    symbol, timeframe, ctx.regime, htf_regime, [r.playbook for r in matched],
-                )
-                for opp in opportunities:
-                    logger.info(
-                        "OPPORTUNITY symbol=%s timeframe=%s playbook=%s direction=%s score=%.1f rr=%s "
-                        "entry=%s stop=%s decision=%s status=%s",
-                        symbol, timeframe, opp.playbook, opp.direction.value, opp.score, opp.rr, opp.entry, opp.stop,
-                        opp.decision.value if opp.decision is not None else None, opp.status.value,
-                    )
-
-                    if opp.status.value == "CONFIRMED":
-                        cycle_stats["total_confirmed"] += 1
-                    elif opp.decision is not None and opp.decision.value == "ESPERAR":
-                        cycle_stats["total_wait_trigger"] += 1
-                    elif opp.decision is not None and opp.decision.value == "REPROVAR":
-                        if opp.status.value == "INVALIDATED":
-                            cycle_stats["total_invalidated"] += 1
-                        else:
-                            cycle_stats["total_rejected"] += 1
-                    else:
-                        cycle_stats["total_setups_forming"] += 1
-
-                    if opp.status.value != "CONFIRMED":
-                        # motivos já persistidos pelo Quality Filter / Decision
-                        # Engine (opportunity_service.upsert_opportunity) —
-                        # aqui só formata pra log estruturado, sem recalcular
-                        # nem inventar nada.
-                        snapshot = opp.audit_snapshot or {}
-                        reasons = (
-                            snapshot.get("decision_engine", {}).get("reasons")
-                            or snapshot.get("quality_filter", {}).get("reasons")
-                            or []
-                        )
-                        reason_text = "; ".join(reasons) if reasons else "sem motivo registrado ainda (setup em formação inicial)"
-                        logger.info(
-                            "%s\nSTATUS: %s\nSCORE: %.1f\nREASON:\n%s",
-                            f"{symbol} {timeframe} {opp.playbook}", opp.status.value, opp.score, reason_text,
-                        )
-
-                    alert_type = decide_alert(db, opp)
-                    if alert_type is not None:
-                        enqueue_alert(db, opp, alert_type)
-                        logger.info(
-                            "alert enqueued symbol=%s timeframe=%s playbook=%s alert_type=%s",
-                            symbol, timeframe, opp.playbook, alert_type.value,
-                        )
-            except MarketDataError as exc:
-                errors += 1
-                logger.error("falha ao coletar %s %s: %s", symbol, timeframe, exc)
-                db.add(ScannerEvent(
-                    event_type="data_engine_error",
-                    asset=symbol,
-                    payload={"timeframe": timeframe, "error": str(exc)},
-                ))
-                db.commit()
+                stats = future.result()
             except Exception:
                 errors += 1
-                logger.exception("erro inesperado no ciclo de %s %s", symbol, timeframe)
-                db.rollback()
-            finally:
-                release_lock(db, lock_key)
+                logger.exception("falha inesperada (fora do try interno) escaneando %s", symbol)
+                continue
+
+            assets_scanned += stats["assets_analyzed"]
+            opportunities_found += stats["opportunities_found"]
+            errors += stats["errors"]
+            cycle_stats["total_assets_analyzed"] += stats["assets_analyzed"]
+            cycle_stats["total_confirmed"] += stats["confirmed"]
+            cycle_stats["total_wait_trigger"] += stats["wait_trigger"]
+            cycle_stats["total_setups_forming"] += stats["setups_forming"]
+            cycle_stats["total_rejected"] += stats["rejected"]
+            cycle_stats["total_invalidated"] += stats["invalidated"]
 
     sent, failed = process_pending_alerts(db, telegram_client)
     if sent or failed:
