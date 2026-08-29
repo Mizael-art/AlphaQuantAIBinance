@@ -557,3 +557,40 @@ def post_test_telegram(message: str | None = None) -> dict:
         }
 
 
+@router.get("/strategies")
+def get_strategies_for_lab() -> dict:
+    """Retorna as estratégias cadastradas para a página Strategy Lab."""
+    from playbook.library import PLAYBOOK
+    
+    strategies = []
+    for idx, pb in enumerate(PLAYBOOK, start=1):
+        strategies.append({
+            "id": idx,
+            "name": pb.name,
+            "mode": pb.style.upper(),
+            "status": "ACTIVE",
+            "version_count": 1,
+            "is_runnable": True,
+            "created_at": "2026-08-25T00:00:00Z",
+            "current_version": {
+                "id": idx,
+                "version_label": "v1.0",
+                "prompt_raw": (
+                    f"Estratégia: {pb.name}\n"
+                    f"Estilo: {pb.style}\n"
+                    f"RR Mínimo: {pb.min_rr}\n"
+                    f"Regimes Compatíveis: {', '.join(sorted(pb.compatible_regimes))}\n\n"
+                    f"Descrição Técnica:\n{pb.description}"
+                ),
+                "status": "APPROVED",
+                "errors": None,
+                "unsupported_conditions": None,
+                "created_at": "2026-08-25T00:00:00Z",
+                "author": "AlphaQuant Core",
+                "change_note": "Versão inicial aprovada",
+            },
+        })
+    return {"strategies": strategies}
+
+
+

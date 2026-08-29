@@ -156,7 +156,7 @@ app.add_middleware(
 )
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root() -> dict:
     """Endpoint raiz — confirma que a API está online e aponta para a documentação e dashboard."""
     return {
@@ -170,7 +170,7 @@ def root() -> dict:
     }
 
 
-@app.get("/health", response_class=FlexibleJSONResponse, responses=_FREEFORM_JSON_OBJECT_RESPONSES)
+@app.api_route("/health", methods=["GET", "HEAD"], response_class=FlexibleJSONResponse, responses=_FREEFORM_JSON_OBJECT_RESPONSES)
 def health() -> dict:
     """Health check expandido — mostra status do scheduler, último ciclo, Telegram, DB e services pro frontend."""
     from sqlalchemy import desc, select as sa_select
