@@ -502,3 +502,58 @@ def get_market_data_for_frontend(symbol: str, timeframe: str = "4h") -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Falha ao obter dados de mercado para {symbol}: {exc}") from exc
 
+
+@router.get("/notifications/test-telegram")
+@router.post("/notifications/test-telegram")
+def post_test_telegram(message: str | None = None) -> dict:
+    """Dispara uma mensagem de teste imediata para o Telegram para validar a conexão e o Chat ID."""
+    from notifications.telegram import send_message, get_telegram_config, check_connection
+    
+    enabled, token, chat_id = get_telegram_config()
+    masked_token = f"{token[:8]}...{token[-4:]}" if len(token) > 12 else ("configurado" if token else "não configurado")
+    
+    if not enabled:
+        return {
+            "status": "disabled",
+            "message": "TELEGRAM_ENABLED está 'false' ou não definido no Render. Defina TELEGRAM_ENABLED=true no painel do Render (Environment Variables).",
+            "bot_token": masked_token,
+            "chat_id": chat_id or "não configurado",
+        }
+        
+    if not token or not chat_id:
+        return {
+            "status": "missing_credentials",
+            "message": "TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não estão configurados no Render (Environment Variables).",
+            "bot_token": masked_token,
+            "chat_id": chat_id or "não configurado",
+        }
+        
+    test_text = message or (
+        "🟢 ALPHAQUANT X — TESTE DE CONEXÃO\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "✅ Bot do Telegram conectado com sucesso!\n"
+        "📡 O sistema autônomo está pronto para enviar oportunidades, TPs e alertas em tempo real.\n"
+        "━━━━━━━━━━━━━━━━━━"
+    )
+    
+    res = send_message(test_text)
+    conn_status = check_connection()
+    
+    if res and res.get("ok"):
+        return {
+            "status": "success",
+            "message": "Mensagem de teste enviada com sucesso ao Telegram!",
+            "chat_id": chat_id,
+            "bot_connection": conn_status,
+            "telegram_response": res,
+        }
+    else:
+        return {
+            "status": "failed",
+            "message": "A API do Telegram retornou um erro ao tentar enviar a mensagem. Verifique se o Bot é administrador do grupo/canal ou se o Chat ID está correto.",
+            "chat_id": chat_id,
+            "bot_connection": conn_status,
+            "telegram_response": res,
+        }
+
+
