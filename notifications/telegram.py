@@ -32,7 +32,12 @@ _SEND_TIMEOUT = 15  # segundos
 def get_telegram_config() -> tuple[bool, str, str]:
     """Lê as variáveis de ambiente dinamicamente."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    chat_id = (
+        os.environ.get("TELEGRAM_CHAT_ID")
+        or os.environ.get("TELEGRAM_SIGNALS_CHAT_ID")
+        or os.environ.get("TELEGRAM_FUTURE_CHAT_ID")
+        or ""
+    ).strip()
     enabled = os.environ.get("TELEGRAM_ENABLED", "false").strip().lower() == "true"
     return enabled, token, chat_id
 
