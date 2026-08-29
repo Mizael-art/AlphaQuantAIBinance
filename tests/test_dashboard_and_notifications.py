@@ -181,3 +181,19 @@ def test_frontend_compatibility_endpoints():
     assert res.status_code == 200
     data = res.json()
     assert "opportunities" in data
+
+    # 7. /auth/login
+    res = client.post("/auth/login")
+    assert res.status_code == 200
+    data = res.json()
+    assert "access_token" in data
+
+    # 8. /health services structure
+    res = client.get("/health")
+    assert res.status_code == 200
+    data = res.json()
+    assert "services" in data
+    assert "worker" in data["services"]
+    assert "database" in data["services"]
+    assert "telegram" in data["services"]
+    assert "market-data" in data["services"]

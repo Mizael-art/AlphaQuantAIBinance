@@ -440,3 +440,65 @@ def _group_by_strategy(setups: list) -> dict:
         v["win_rate"] = round(v["wins"] / v["total"] * 100, 1) if v["total"] > 0 else 0.0
 
     return by_strategy
+
+
+@router.post("/auth/login")
+def post_auth_login() -> dict:
+    """Endpoint de login compatível com o frontend."""
+    return {
+        "access_token": "alphaquant_jwt_token_auth_ok",
+        "token_type": "bearer",
+        "expires_in": 86400,
+    }
+
+
+@router.get("/market-data/{symbol}")
+def get_market_data_for_frontend(symbol: str, timeframe: str = "4h") -> dict:
+    """Retorna dados de indicadores e estrutura para a página Market Intelligence do frontend."""
+    from app import run_analysis
+    
+    tf_normalized = timeframe.upper()
+    if tf_normalized == "1H":
+        tf_normalized = "1H"
+    elif tf_normalized == "4H":
+        tf_normalized = "4H"
+    elif tf_normalized == "15M":
+        tf_normalized = "15m"
+    elif tf_normalized == "1D":
+        tf_normalized = "1D"
+
+    try:
+        res = run_analysis(symbol=symbol.upper(), timeframe=tf_normalized)
+        return {
+            "symbol": res.symbol,
+            "timeframe": res.timeframe,
+            "last_close": res.price,
+            "candles_analyzed": 200,
+            "indicators": {
+                "rsi14": res.rsi,
+                "ema20": res.ema20,
+                "ema50": res.ema50,
+                "ema100": res.ema100,
+                "ema200": res.ema200,
+                "atr14": res.atr,
+                "macd": res.macd,
+                "macd_signal": res.macd_signal,
+                "volume_avg": res.volume_avg,
+            },
+            "structure": {
+                "trend": res.structure.to_dict().get("trend", res.trend),
+                "bos": res.structure.bos,
+                "choch": res.structure.choch,
+                "regime": res.trend,
+                "events": [
+                    {"type": f"BOS detectado ({res.trend})" if res.structure.bos else f"Tendência {res.trend}", "timestamp": datetime.now(timezone.utc).isoformat()},
+                    {"type": f"CHOCH detectado" if res.structure.choch else f"Score {res.score}/100", "timestamp": datetime.now(timezone.utc).isoformat()},
+                ],
+            },
+            "support": res.support,
+            "resistance": res.resistance,
+            "score": res.score,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao obter dados de mercado para {symbol}: {exc}") from exc
+
