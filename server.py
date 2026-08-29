@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
@@ -145,6 +146,28 @@ app = FastAPI(
     version="2.6",
     servers=[{"url": "https://alphaquantaibybit.onrender.com", "description": "Produção (Render)"}],
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/")
+def root() -> dict:
+    """Endpoint raiz — confirma que a API está online e aponta para a documentação e dashboard."""
+    return {
+        "status": "online",
+        "system": "AlphaQuant X Autonomous Market Intelligence System",
+        "version": "2.6",
+        "docs": "/docs",
+        "health": "/health",
+        "summary": "/summary",
+        "dashboard_overview": "/dashboard/overview",
+    }
 
 
 @app.get("/health", response_class=FlexibleJSONResponse, responses=_FREEFORM_JSON_OBJECT_RESPONSES)
