@@ -1,0 +1,10 @@
+{
+  "description": "Empowering professional traders with real-time market scanning, opportunity detection, and strategy management for informed decision-making.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
