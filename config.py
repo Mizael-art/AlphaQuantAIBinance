@@ -16,6 +16,7 @@ endpoints) é feito em um único ponto, sem tocar na lógica de negócio.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -298,3 +299,16 @@ CROSS_EXCHANGE_PRICE_LIMIT: Final[int] = 50
 # de histórico suficiente para swings/BOS/CHOCH confiáveis -- mesmo
 # mínimo usado pelo `TimeframeSnapshot` de fonte única).
 CROSS_EXCHANGE_STRUCTURE_LIMIT: Final[int] = 300
+
+# Configurações do Autonomous Engine
+AUTONOMOUS_ENGINE_ENABLED: Final[bool] = os.environ.get("AUTONOMOUS_ENGINE_ENABLED", "true").lower() == "true"
+SCAN_INTERVAL_MINUTES: Final[int] = int(os.environ.get("SCAN_INTERVAL_MINUTES", "15"))
+
+# Telegram
+TELEGRAM_ENABLED: Final[bool] = os.environ.get("TELEGRAM_ENABLED", "false").lower() == "true"
+TELEGRAM_BOT_TOKEN: Final[str] = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID: Final[str] = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_COOLDOWN_HOURS: Final[float] = float(os.environ.get("TELEGRAM_COOLDOWN_HOURS", "4"))
+
+# Cache
+KLINE_CACHE_TTL_SECONDS: Final[int] = int(os.environ.get("KLINE_CACHE_TTL_SECONDS", "180"))

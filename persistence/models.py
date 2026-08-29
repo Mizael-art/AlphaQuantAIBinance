@@ -269,3 +269,81 @@ class SignalRecord(Base):
             "signal_quality_label": self.signal_quality_label,
             "created_at": self.created_at.isoformat(),
         }
+
+class SystemCycle(Base):
+    """Registro de cada ciclo autônomo do sistema."""
+    __tablename__ = "system_cycles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    
+    universe_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stage1_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stage2_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    discovery_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    playbook_valid_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quality_valid_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    
+    setups_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    setups_updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    setups_expired: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    setups_invalidated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    signals_sent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    
+    errors_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="RUNNING")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "duration_seconds": self.duration_seconds,
+            "universe_size": self.universe_size,
+            "stage1_count": self.stage1_count,
+            "stage2_count": self.stage2_count,
+            "discovery_count": self.discovery_count,
+            "playbook_valid_count": self.playbook_valid_count,
+            "quality_valid_count": self.quality_valid_count,
+            "setups_created": self.setups_created,
+            "setups_updated": self.setups_updated,
+            "setups_expired": self.setups_expired,
+            "setups_invalidated": self.setups_invalidated,
+            "signals_sent": self.signals_sent,
+            "errors_count": self.errors_count,
+            "error_summary": self.error_summary,
+            "status": self.status,
+        }
+
+class TelegramSignal(Base):
+    """Registro de calls enviadas ao Telegram para deduplicação."""
+    __tablename__ = "telegram_signals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    setup_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    signal_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    message_text: Mapped[str] = mapped_column(String, nullable=False)
+    telegram_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    chat_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    
+    __table_args__ = (Index("ix_telegram_signals_setup_type", "setup_id", "signal_type"),)
+
+class CandidateSnapshot(Base):
+    """Snapshot minimizado de candidatos rejeitados/analisados por ciclo (para dashboard/auditoria)."""
+    __tablename__ = "candidate_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cycle_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    
+    __table_args__ = (Index("ix_candidate_snapshots_cycle", "cycle_id"),)

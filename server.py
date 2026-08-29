@@ -147,10 +147,36 @@ app = FastAPI(
 )
 
 
-@app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    """Health check simples -- não toca em nenhuma API externa."""
-    return HealthResponse(status="ok")
+@app.get("/health", response_class=FlexibleJSONResponse, responses=_FREEFORM_JSON_OBJECT_RESPONSES)
+def health() -> dict:
+    """Health check expandido — mostra status do scheduler, último ciclo, Telegram e DB."""
+    from sqlalchemy import desc, select as sa_select
+    from persistence.models import SystemCycle
+    from notifications.telegram import check_connection as tg_check
+
+    result = {"status": "ok"}
+    try:
+        with session_scope() as session:
+            stmt = sa_select(SystemCycle).order_by(desc(SystemCycle.id)).limit(1)
+            last = session.execute(stmt).scalars().first()
+            if last:
+                result["scheduler"] = "running"
+                result["last_cycle"] = last.started_at.isoformat() if last.started_at else None
+                result["last_cycle_status"] = last.status
+                result["last_cycle_duration"] = last.duration_seconds
+            else:
+                result["scheduler"] = "no_cycles_yet"
+    except Exception:
+        result["database"] = "error"
+
+    result["telegram"] = tg_check()
+    result["database"] = result.get("database", "healthy")
+    return result
+
+
+# Dashboard Router
+from dashboard.endpoints import router as dashboard_router
+app.include_router(dashboard_router)
 
 
 @app.get("/snapshot", response_class=FlexibleJSONResponse, responses=_FREEFORM_JSON_OBJECT_RESPONSES)
@@ -913,3 +939,76 @@ def post_portfolio_selection(request: PortfolioSelectionRequest) -> dict:
         max_positions=request.max_positions, correlation_flags=request.correlation_flags,
     )
     return result.to_dict()
+
+# ----------------------------------------------------------------------
+# Autonomous Engine Integration (Fase 1)
+# ----------------------------------------------------------------------
+
+from engine.scheduler import start_scheduler, shutdown_scheduler
+from config import AUTONOMOUS_ENGINE_ENABLED, SCAN_INTERVAL_MINUTES
+
+@app.on_event("startup")
+def startup_event():
+    """
+    Ao iniciar:
+      1. Verifica último ciclo no banco
+      2. Se passou mais de SCAN_INTERVAL_MINUTES, executa ciclo imediato
+      3. Inicia scheduler para ciclos recorrentes
+    
+    Garante one-scheduler-per-process.
+    """
+    if not AUTONOMOUS_ENGINE_ENABLED:
+        return
+
+    import logging
+    logger = logging.getLogger("alphaquant.startup")
+    logger.info("AUTONOMOUS_ENGINE_ENABLED=true. Iniciando scheduler...")
+
+    # Verificar se precisa ciclo imediato (restart recovery)
+    try:
+        from datetime import datetime, timedelta, timezone
+        from sqlalchemy import desc, select as sa_select
+        from persistence.db import session_scope as _ss
+        from persistence.models import SystemCycle
+
+        with _ss() as session:
+            stmt = sa_select(SystemCycle).order_by(desc(SystemCycle.id)).limit(1)
+            last = session.execute(stmt).scalars().first()
+
+            if last and last.finished_at:
+                elapsed = (datetime.now(timezone.utc) - last.finished_at).total_seconds()
+                if elapsed > SCAN_INTERVAL_MINUTES * 60:
+                    logger.info(
+                        f"Último ciclo há {elapsed/60:.0f} min. "
+                        f"Executando ciclo imediato de recovery..."
+                    )
+                    import threading
+                    from engine.autonomous_cycle import run_market_cycle
+                    threading.Thread(target=run_market_cycle, daemon=True).start()
+                else:
+                    logger.info(f"Último ciclo há {elapsed/60:.0f} min. Sem necessidade de recovery.")
+            else:
+                logger.info("Nenhum ciclo anterior encontrado. Primeiro ciclo será agendado.")
+    except Exception as exc:
+        logger.warning(f"Falha no restart recovery check (não fatal): {exc}")
+
+    start_scheduler(interval_minutes=SCAN_INTERVAL_MINUTES)
+
+@app.on_event("shutdown")
+def shutdown_event():
+    shutdown_scheduler()
+
+# Endpoint para disparar o ciclo manualmente (para testes e debugging)
+@app.post("/monitoring/run-autonomous-cycle")
+def post_run_autonomous_cycle():
+    """Dispara um ciclo autônomo manualmente. Retorna imediatamente — o ciclo roda em background."""
+    from engine.autonomous_cycle import run_market_cycle
+    from engine.scheduler import _cycle_lock
+    
+    if not _cycle_lock.acquire(blocking=False):
+        return {"status": "rejected", "message": "Um ciclo já está em execução."}
+    _cycle_lock.release()
+    
+    import threading
+    threading.Thread(target=run_market_cycle, daemon=True).start()
+    return {"status": "accepted", "message": "Ciclo autônomo disparado em background."}
