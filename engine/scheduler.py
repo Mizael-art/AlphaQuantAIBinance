@@ -45,6 +45,10 @@ def start_scheduler(interval_minutes: int = 15):
     _scheduler.start()
     logger.info(f"Scheduler iniciado. Ciclo agendado para rodar a cada {interval_minutes} minutos.")
 
+    # Dispara o primeiro ciclo imediatamente em background para popular os dados sem esperar o intervalo
+    threading.Thread(target=_run_cycle_job, daemon=True).start()
+    logger.info("Primeiro ciclo de mercado disparado imediatamente na inicialização.")
+
 def shutdown_scheduler():
     global _scheduler
     if _scheduler is not None and _scheduler.running:

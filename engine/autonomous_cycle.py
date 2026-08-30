@@ -257,19 +257,22 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
                 entry_quality=entry_quality,
             )
 
-            # Registrar rejeições para auditoria
-            if decision.decision == "REJECT":
+            # Se rejeitado estritamente pelo Risk Engine por limites de conta
+            if risk_result.decision == "REJECTED":
                 session.add(CandidateSnapshot(
                     cycle_id=cycle.id,
                     symbol=symbol,
-                    stage="decision",
+                    stage="risk",
                     score=opp.get("overall", opp.get("score", {}).get("overall")),
                     status="REJECTED",
-                    rejection_reason="; ".join(decision.reasons),
+                    rejection_reason="; ".join(risk_result.reasons),
                 ))
                 continue
 
             cycle.quality_valid_count += 1
+
+            # Determinar status inicial do setup (WATCH se aguardando, READY se entrada imediata)
+            initial_status = "READY" if decision.decision in ("LONG_NOW", "SHORT_NOW") else WATCH
 
             # Construir SetupCandidate para upsert
             entry_zone_data = opp.get("entry_zone")
@@ -284,7 +287,7 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
                 asset=symbol,
                 direction=direction,
                 strategy=opp.get("playbook", "unknown"),
-                status=WATCH,
+                status=initial_status,
                 entry_zone=entry_zone_obj,
                 stop=opp.get("stop"),
                 tp1=opp.get("target"),
@@ -296,7 +299,7 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
             upsert_res = upsert_setup(session, candidate)
             if upsert_res.created:
                 cycle.setups_created += 1
-                logger.info(f"[SETUP NEW] {symbol} {direction} via {opp.get('playbook')}")
+                logger.info(f"[SETUP NEW] {symbol} {direction} ({initial_status}) via {opp.get('playbook')}")
                 # Notificar Telegram apenas para decisões de entrada confirmadas
                 if decision.decision in ("LONG_NOW", "SHORT_NOW"):
                     try:

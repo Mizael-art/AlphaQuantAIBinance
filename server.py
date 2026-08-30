@@ -1052,16 +1052,16 @@ def shutdown_event():
     shutdown_scheduler()
 
 # Endpoint para disparar o ciclo manualmente (para testes e debugging)
-@app.post("/monitoring/run-autonomous-cycle")
+@app.api_route("/monitoring/run-autonomous-cycle", methods=["GET", "POST"])
 def post_run_autonomous_cycle():
     """Dispara um ciclo autônomo manualmente. Retorna imediatamente — o ciclo roda em background."""
     from engine.autonomous_cycle import run_market_cycle
     from engine.scheduler import _cycle_lock
     
     if not _cycle_lock.acquire(blocking=False):
-        return {"status": "rejected", "message": "Um ciclo já está em execução."}
+        return {"status": "running", "message": "Um ciclo de mercado já está em execução no momento."}
     _cycle_lock.release()
     
     import threading
     threading.Thread(target=run_market_cycle, daemon=True).start()
-    return {"status": "accepted", "message": "Ciclo autônomo disparado em background."}
+    return {"status": "started", "message": "Ciclo autônomo disparado com sucesso em background. Acompanhe pelo /dashboard/overview ou /opportunities."}
