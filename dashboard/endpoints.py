@@ -399,6 +399,53 @@ def get_trades_performance() -> dict:
         }
 
 
+@router.get("/opportunities")
+def get_opportunities(
+    limit: int = Query(default=100, ge=1, le=500),
+    status: str | None = None,
+) -> dict:
+    """Lista de oportunidades / setups para o frontend."""
+    with session_scope() as session:
+        stmt = select(SetupRecord).order_by(desc(SetupRecord.score), desc(SetupRecord.updated_at))
+        if status and status != "ALL":
+            if status == "CONFIRMED":
+                stmt = stmt.where(SetupRecord.status.in_(("ACTIVE", "READY", "TRIGGERED", "ENTRY_READY")))
+            elif status == "FORMATION":
+                stmt = stmt.where(SetupRecord.status.in_(("FORMATION", "WATCH", "NEAR_ENTRY")))
+            elif status == "INVALIDATED":
+                stmt = stmt.where(SetupRecord.status == "INVALIDATED")
+            else:
+                stmt = stmt.where(SetupRecord.status == status)
+        
+        records = session.execute(stmt.limit(limit)).scalars().all()
+        
+        items = []
+        for r in records:
+            is_confirmed = r.status in ("ACTIVE", "READY", "TRIGGERED", "ENTRY_READY")
+            is_inv = r.status in ("INVALIDATED", "EXPIRED", "CANCELLED")
+            items.append({
+                "id": r.id,
+                "asset": r.asset,
+                "timeframe": "1H",
+                "direction": (r.direction or "LONG").upper(),
+                "score": int(r.score or 70),
+                "playbook": r.strategy or "Trend Continuation",
+                "status": "CONFIRMED" if is_confirmed else ("INVALIDATED" if is_inv else "FORMATION"),
+                "confidence": "HIGH" if (r.score or 0) >= 80 else ("MEDIUM" if (r.score or 0) >= 60 else "LOW"),
+                "entry": r.entry_zone_low or 0.0,
+                "stop": r.stop or 0.0,
+                "targets": [r.tp1] if r.tp1 else [],
+                "rr": r.rr or 1.5,
+                "progress": 100 if r.status == "ACTIVE" else (75 if r.status in ("READY", "TRIGGERED") else 35),
+                "decision": "ENTRAR" if is_confirmed else ("INVALIDADO" if is_inv else "ESPERAR"),
+                "reasons": [r.reason_for_change or "Setup em análise"],
+                "detected_at": r.created_at.isoformat() if r.created_at else datetime.now(timezone.utc).isoformat(),
+                "last_update": r.updated_at.isoformat() if r.updated_at else datetime.now(timezone.utc).isoformat(),
+            })
+            
+        return {"count": len(items), "opportunities": items}
+
+
 @router.get("/opportunities/{opportunity_id}")
 def get_opportunity_detail(opportunity_id: int) -> dict:
     """Detalhes completos de uma oportunidade com auditoria."""

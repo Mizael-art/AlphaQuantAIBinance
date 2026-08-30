@@ -319,6 +319,45 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
 
     session.flush()
 
+    # ──────────────────────────────────────────────────────────────────
+    # 7. RELATÓRIO DO RADAR DE MERCADO NO TELEGRAM (A cada ciclo)
+    # ──────────────────────────────────────────────────────────────────
+    try:
+        from providers.bybit_universe import get_bulk_ticker_snapshot
+        from notifications.formatter import format_market_scan_report
+        from notifications.telegram import send_message
+
+        tickers = get_bulk_ticker_snapshot()
+        sorted_by_change = sorted(tickers.values(), key=lambda t: t.price_change_pct_24h, reverse=True)
+        top_gainers = [(t.symbol, t.price_change_pct_24h, t.last_price) for t in sorted_by_change[:5]]
+        top_losers = [(t.symbol, t.price_change_pct_24h, t.last_price) for t in sorted_by_change[-5:]]
+        top_losers.reverse()
+
+        open_setups = list_setups(session, exclude_terminal=True)
+        watch_list = [
+            {"asset": s.asset, "direction": s.direction, "score": s.score, "strategy": s.strategy}
+            for s in open_setups if s.status in ("FORMATION", "WATCH", "NEAR_ENTRY")
+        ]
+        ready_list = [
+            {"asset": s.asset, "direction": s.direction, "score": s.score, "strategy": s.strategy}
+            for s in open_setups if s.status in ("READY", "TRIGGERED", "ENTRY_READY", "ACTIVE")
+        ]
+
+        report_msg = format_market_scan_report(
+            universe_size=cycle.universe_size or len(tickers),
+            stage1_count=cycle.stage1_count or 60,
+            stage2_count=cycle.stage2_count or 55,
+            top_gainers=top_gainers,
+            top_losers=top_losers,
+            setups_watch=watch_list,
+            setups_ready=ready_list,
+        )
+        send_message(report_msg)
+        logger.info("[TELEGRAM] Relatório de radar de mercado enviado com sucesso ao grupo.")
+    except Exception as exc:
+        logger.warning(f"Falha ao enviar radar de mercado no Telegram: {exc}")
+
+
 
 def run_market_cycle() -> None:
     """

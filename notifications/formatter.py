@@ -163,3 +163,78 @@ def format_setup_update(record: SetupRecord, change_type: str) -> str:
         "\n"
         "━━━━━━━━━━━━━━━━━━\n"
     )
+
+
+def format_market_scan_report(
+    *,
+    universe_size: int,
+    stage1_count: int,
+    stage2_count: int,
+    top_gainers: list[tuple[str, float, float]],
+    top_losers: list[tuple[str, float, float]],
+    setups_watch: list[dict],
+    setups_ready: list[dict],
+) -> str:
+    """Formata o relatório periódico / horário de inteligência de mercado do AlphaQuant X."""
+    gainers_lines = ""
+    for sym, chg, price in top_gainers[:5]:
+        gainers_lines += f"  🟢 {sym}: +{chg:.2f}% (${price:.4f})\n"
+
+    losers_lines = ""
+    for sym, chg, price in top_losers[:5]:
+        losers_lines += f"  🔴 {sym}: {chg:.2f}% (${price:.4f})\n"
+
+    watch_lines = ""
+    for s in setups_watch[:6]:
+        d_emoji = "📈" if s.get("direction", "").lower() == "long" else "📉"
+        score_val = s.get("score")
+        score = f"⭐ {score_val:.0f}/100" if score_val else ""
+        watch_lines += f"  {d_emoji} {s.get('asset')}: {s.get('strategy', 'Setup')} ({score})\n"
+
+    ready_lines = ""
+    for s in setups_ready[:5]:
+        d_emoji = "🚀" if s.get("direction", "").lower() == "long" else "🔻"
+        score_val = s.get("score")
+        score = f"⭐ {score_val:.0f}/100" if score_val else ""
+        ready_lines += f"  {d_emoji} {s.get('asset')}: {s.get('strategy', 'Setup')} ({score})\n"
+
+    msg = (
+        "🌐 ALPHAQUANT X — RADAR DE MERCADO\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 Universo Bybit: {universe_size} pares\n"
+        f"🔍 Filtro de Atividade (Stage 1): {stage1_count} pares\n"
+        f"🔬 Análise Aprofundada (Stage 2): {stage2_count} pares\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "\n"
+        "🚀 TOP 5 MAIORES ALTAS (24H):\n"
+        f"{gainers_lines or '  (sem dados no momento)\n'}"
+        "\n"
+        "🔻 TOP 5 MAIORES QUEDAS (24H):\n"
+        f"{losers_lines or '  (sem dados no momento)\n'}"
+        "\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    if ready_lines:
+        msg += (
+            "🎯 CALLS / SETUPS CONFIRMADOS:\n"
+            f"{ready_lines}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+
+    if watch_lines:
+        msg += (
+            "⏳ SETUPS EM FORMAÇÃO (AGUARDANDO CONFIRMAÇÃO):\n"
+            f"{watch_lines}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+    else:
+        msg += (
+            "⏳ SETUPS EM FORMAÇÃO:\n"
+            "  Nenhum setup em zona no momento. Varredura contínua 24/7.\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+
+    msg += "📡 Scanner ativo | Monitorando mercado em tempo real."
+    return msg
+

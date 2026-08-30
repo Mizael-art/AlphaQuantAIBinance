@@ -22,19 +22,29 @@ interface Group {
 
 function groupByAssetTimeframe(opps: Opportunity[]): Group[] {
   const map = new Map<string, Opportunity[]>();
-  for (const o of opps) {
-    const key = `${o.asset}__${o.timeframe}__${o.direction}`;
+  for (const o of (opps || [])) {
+    if (!o) continue;
+    const key = `${o.asset || "UNKNOWN"}__${o.timeframe || "1H"}__${o.direction || "LONG"}`;
     if (!map.has(key)) map.set(key, []);
     map.get(key)!.push(o);
   }
-  return Array.from(map.entries()).map(([key, group]) => {
-    const confirmed = group.filter((o) => o.status === "CONFIRMED");
-    const best = [...group].sort((a, b) => b.score - a.score)[0];
-    // status do grupo: CONFIRMED se qualquer playbook confirmou, senão o
-    // status do melhor score
-    const status = confirmed.length > 0 ? "CONFIRMED" : best.status;
-    return { key, asset: best.asset, timeframe: best.timeframe, direction: best.direction, best, confirmed, all: group, status };
-  });
+  return Array.from(map.entries())
+    .map(([key, group]) => {
+      const confirmed = group.filter((o) => o.status === "CONFIRMED");
+      const best = [...group].sort((a, b) => (b.score || 0) - (a.score || 0))[0] || group[0];
+      const status = confirmed.length > 0 ? "CONFIRMED" : (best?.status || "FORMATION");
+      return {
+        key,
+        asset: best?.asset || "UNKNOWN",
+        timeframe: best?.timeframe || "1H",
+        direction: (best?.direction || "LONG") as "LONG" | "SHORT",
+        best,
+        confirmed,
+        all: group,
+        status,
+      };
+    })
+    .filter((g) => g.best);
 }
 
 export default function Opportunities() {

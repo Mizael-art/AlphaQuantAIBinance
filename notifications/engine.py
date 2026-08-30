@@ -135,10 +135,15 @@ def process_monitoring_updates(
 
     for update in updates:
         new_status = update.get("to", "")
+        old_status = update.get("from", "")
         event_type = _NOTIFY_TRANSITIONS.get(new_status)
 
         if event_type is None:
             continue  # Transição não gera notificação
+
+        # Só notifica invalidação se o setup estava REALMENTE ativo ou pronto para entrada
+        if event_type == "invalidated" and old_status not in ("ACTIVE", "READY", "TRIGGERED", "ENTRY_READY"):
+            continue
 
         setup_id = update.get("setup_id")
         if setup_id is None:

@@ -64,13 +64,14 @@ export function ScoreBadge({ score }: { score: number }) {
 
 // ─── Direction badge ───────────────────────────────────────────────────────────
 
-export function DirectionBadge({ direction }: { direction: "LONG" | "SHORT" | "AUTO" }) {
-  if (direction === "LONG") return (
+export function DirectionBadge({ direction }: { direction: string }) {
+  const d = (direction || "").toUpperCase();
+  if (d === "LONG") return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/20 font-mono text-[9px] tracking-widest rounded-sm">
       ▲ LONG
     </span>
   );
-  if (direction === "SHORT") return (
+  if (d === "SHORT") return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#ef4444]/10 text-[#ef4444] border border-[#ef4444]/20 font-mono text-[9px] tracking-widest rounded-sm">
       ▼ SHORT
     </span>
