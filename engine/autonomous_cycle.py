@@ -46,6 +46,8 @@ from setups.schema import EntryZone, SetupCandidate
 
 logger = logging.getLogger("alphaquant.engine.cycle")
 
+_last_hourly_report_sent: float = 0.0
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -300,14 +302,14 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
             if upsert_res.created:
                 cycle.setups_created += 1
                 logger.info(f"[SETUP NEW] {symbol} {direction} ({initial_status}) via {opp.get('playbook')}")
-                # Notificar Telegram apenas para decisões de entrada confirmadas
-                if decision.decision in ("LONG_NOW", "SHORT_NOW"):
+                # Notificar Telegram para decisões confirmadas (READY, LONG_NOW, SHORT_NOW)
+                if decision.decision in ("LONG_NOW", "SHORT_NOW") or initial_status == "READY":
                     try:
                         sent = process_new_setup(session, upsert_res.record, decision.to_dict())
                         if sent:
                             cycle.signals_sent += 1
                     except Exception as exc:
-                        logger.error(f"Erro ao enviar notificação para {symbol}: {exc}")
+                        logger.error(f"Erro ao enviar notificação de entrada para {symbol}: {exc}")
             elif upsert_res.change_type != "unchanged":
                 cycle.setups_updated += 1
                 logger.info(f"[SETUP UPDATE] {symbol} {direction} → {upsert_res.change_type}")
@@ -320,42 +322,47 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
     session.flush()
 
     # ──────────────────────────────────────────────────────────────────
-    # 7. RELATÓRIO DO RADAR DE MERCADO NO TELEGRAM (A cada ciclo)
+    # 7. RELATÓRIO DO RADAR DE MERCADO NO TELEGRAM (A cada hora ou 1º ciclo)
     # ──────────────────────────────────────────────────────────────────
-    try:
-        from providers.bybit_universe import get_bulk_ticker_snapshot
-        from notifications.formatter import format_market_scan_report
-        from notifications.telegram import send_message
+    global _last_hourly_report_sent
+    now_ts = time.time()
+    # Envia o radar se passou pelo menos 45 min do último (1x por hora) ou se for o 1º ciclo
+    if (_last_hourly_report_sent == 0.0) or (now_ts - _last_hourly_report_sent >= 2700):
+        try:
+            from providers.bybit_universe import get_bulk_ticker_snapshot
+            from notifications.formatter import format_market_scan_report
+            from notifications.telegram import send_message
 
-        tickers = get_bulk_ticker_snapshot()
-        sorted_by_change = sorted(tickers.values(), key=lambda t: t.price_change_pct_24h, reverse=True)
-        top_gainers = [(t.symbol, t.price_change_pct_24h, t.last_price) for t in sorted_by_change[:5]]
-        top_losers = [(t.symbol, t.price_change_pct_24h, t.last_price) for t in sorted_by_change[-5:]]
-        top_losers.reverse()
+            tickers = get_bulk_ticker_snapshot()
+            sorted_by_change = sorted(tickers.values(), key=lambda t: t.price_change_pct_24h, reverse=True)
+            top_gainers = [(t.symbol, t.price_change_pct_24h, t.last_price) for t in sorted_by_change[:5]]
+            top_losers = [(t.symbol, t.price_change_pct_24h, t.last_price) for t in sorted_by_change[-5:]]
+            top_losers.reverse()
 
-        open_setups = list_setups(session, exclude_terminal=True)
-        watch_list = [
-            {"asset": s.asset, "direction": s.direction, "score": s.score, "strategy": s.strategy}
-            for s in open_setups if s.status in ("FORMATION", "WATCH", "NEAR_ENTRY")
-        ]
-        ready_list = [
-            {"asset": s.asset, "direction": s.direction, "score": s.score, "strategy": s.strategy}
-            for s in open_setups if s.status in ("READY", "TRIGGERED", "ENTRY_READY", "ACTIVE")
-        ]
+            open_setups = list_setups(session, exclude_terminal=True)
+            watch_list = [
+                {"asset": s.asset, "direction": s.direction, "score": s.score, "strategy": s.strategy}
+                for s in open_setups if s.status in ("FORMATION", "WATCH", "NEAR_ENTRY")
+            ]
+            ready_list = [
+                {"asset": s.asset, "direction": s.direction, "score": s.score, "strategy": s.strategy}
+                for s in open_setups if s.status in ("READY", "TRIGGERED", "ENTRY_READY", "ACTIVE")
+            ]
 
-        report_msg = format_market_scan_report(
-            universe_size=cycle.universe_size or len(tickers),
-            stage1_count=cycle.stage1_count or 60,
-            stage2_count=cycle.stage2_count or 55,
-            top_gainers=top_gainers,
-            top_losers=top_losers,
-            setups_watch=watch_list,
-            setups_ready=ready_list,
-        )
-        send_message(report_msg)
-        logger.info("[TELEGRAM] Relatório de radar de mercado enviado com sucesso ao grupo.")
-    except Exception as exc:
-        logger.warning(f"Falha ao enviar radar de mercado no Telegram: {exc}")
+            report_msg = format_market_scan_report(
+                universe_size=cycle.universe_size or len(tickers),
+                stage1_count=cycle.stage1_count or 60,
+                stage2_count=cycle.stage2_count or 55,
+                top_gainers=top_gainers,
+                top_losers=top_losers,
+                setups_watch=watch_list,
+                setups_ready=ready_list,
+            )
+            send_message(report_msg)
+            _last_hourly_report_sent = now_ts
+            logger.info("[TELEGRAM] Relatório horário de radar de mercado enviado com sucesso.")
+        except Exception as exc:
+            logger.warning(f"Falha ao enviar radar de mercado no Telegram: {exc}")
 
 
 
