@@ -54,6 +54,17 @@ def should_send_notification(
     """
     # Eventos críticos sempre passam
     if signal_type in _ALWAYS_NOTIFY_TYPES:
+        # Se for invalidação, só envia se o setup REALMENTE teve uma call prévia enviada ao grupo
+        if signal_type == "invalidated":
+            prev_call_stmt = select(TelegramSignal).where(
+                TelegramSignal.setup_id == setup_id,
+                TelegramSignal.signal_type == "new_setup",
+            )
+            prev_call = session.execute(prev_call_stmt).scalars().first()
+            if prev_call is None:
+                logger.info(f"[DEDUP] Setup #{setup_id} nunca foi enviado como call no Telegram. Invalidação suprimida.")
+                return False
+
         # Mas verifica se já enviamos EXATAMENTE este tipo para este setup
         stmt = select(TelegramSignal).where(
             TelegramSignal.setup_id == setup_id,
