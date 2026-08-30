@@ -634,10 +634,18 @@ def get_strategies_for_lab() -> dict:
                 "unsupported_conditions": None,
                 "created_at": "2026-08-25T00:00:00Z",
                 "author": "AlphaQuant Core",
-                "change_note": "Versão inicial aprovada",
             },
         })
     return {"strategies": strategies}
 
 
+@router.get("/playbooks")
+def get_playbooks_catalog() -> dict:
+    """Retorna o catálogo completo dos 76 Playbooks do AlphaQuant X."""
+    from playbook.library import PLAYBOOK_CATALOG
+
+    return {
+        "total_playbooks": len(PLAYBOOK_CATALOG),
+        "playbooks": [p.to_dict() for p in PLAYBOOK_CATALOG],
+    }
 
