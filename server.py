@@ -1037,13 +1037,33 @@ def startup_event():
                     )
                     import threading
                     from engine.autonomous_cycle import run_market_cycle
-                    threading.Thread(target=run_market_cycle, daemon=True).start()
-                else:
+                elif elapsed <= SCAN_INTERVAL_MINUTES * 60:
                     logger.info(f"Último ciclo há {elapsed/60:.0f} min. Sem necessidade de recovery.")
             else:
-                logger.info("Nenhum ciclo anterior encontrado. Primeiro ciclo será agendado.")
+                logger.info("Primeiro ciclo será disparado na inicialização.")
     except Exception as exc:
-        logger.warning(f"Falha no restart recovery check (não fatal): {exc}")
+        logger.warning(f"Falha no recovery check (não fatal): {exc}")
+
+    # Enviar mensagem de boas-vindas / inicialização no Telegram
+    try:
+        from notifications.telegram import send_message, is_telegram_configured
+        if is_telegram_configured():
+            msg = (
+                "🚀 ALPHAQUANT X — SISTEMA INICIADO\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "👋 Olá! O motor de inteligência de mercado autônomo está no ar!\n"
+                "\n"
+                "📡 Varredura 24/7 ativada em todos os perpétuos da Bybit.\n"
+                "🔎 Buscando ativamente as melhores oportunidades, confluências técnicas e TPs.\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "⚡ Status: 100% Operacional\n"
+                "⏱️ Intervalo de análise: a cada 15 minutos\n"
+                "🌐 Relatórios de mercado: de hora em hora"
+            )
+            send_message(msg)
+            logger.info("Notificação de boas-vindas enviada ao Telegram.")
+    except Exception as exc:
+        logger.warning(f"Não foi possível enviar anúncio de startup ao Telegram: {exc}")
 
     start_scheduler(interval_minutes=SCAN_INTERVAL_MINUTES)
 
