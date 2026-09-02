@@ -189,6 +189,25 @@ def health() -> dict:
     except Exception:
         db_status = "error"
 
+    # Self-healing trigger via UptimeRobot / health pings
+    try:
+        now_dt = datetime.now(timezone.utc)
+        if last_cycle_info and last_cycle_info.finished_at:
+            fin = last_cycle_info.finished_at
+            if fin.tzinfo is None:
+                fin = fin.replace(tzinfo=timezone.utc)
+            elapsed_sec = (now_dt - fin).total_seconds()
+            if elapsed_sec >= 900:  # 15 minutos
+                import threading
+                from engine.scheduler import _run_cycle_job
+                threading.Thread(target=_run_cycle_job, daemon=True).start()
+        elif last_cycle_info is None:
+            import threading
+            from engine.scheduler import _run_cycle_job
+            threading.Thread(target=_run_cycle_job, daemon=True).start()
+    except Exception:
+        pass
+
     tg_status = tg_check()
     worker_status = "ONLINE" if (last_cycle_info and last_cycle_info.status == "COMPLETED") else "ONLINE"
     worker_heartbeat = last_cycle_info.finished_at.isoformat() if (last_cycle_info and last_cycle_info.finished_at) else now

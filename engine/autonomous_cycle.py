@@ -56,14 +56,15 @@ def _utcnow() -> datetime:
 def _determine_entry_quality(distance_pct: float | None) -> str:
     """Mapeia distância percentual para qualidade de entrada do Decision Engine."""
     if distance_pct is None:
-        return "NO_ENTRY"
-    if distance_pct < 0.2:
         return "ENTRY_NOW"
-    if distance_pct < 1.0:
-        return "ENTRY_ON_PULLBACK"
-    if distance_pct < 2.0:
+    if distance_pct <= 1.2:
+        return "ENTRY_NOW"
+    if distance_pct <= 2.5:
         return "ENTRY_ON_CONFIRMATION"
+    if distance_pct <= 5.0:
+        return "ENTRY_ON_PULLBACK"
     return "NO_ENTRY"
+
 
 
 def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
@@ -163,161 +164,156 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
         cycle.errors_count += 1
         return
 
-    # Reunir candidatos para Discovery
+    # Reunir candidatos para Discovery (Entry Zone + Watch + Out of Zone para avaliar os 76 playbooks)
     candidatos = (
         [e.symbol for e in scan_result.entry_zone]
         + [w.symbol for w in scan_result.watch]
+        + [o.symbol for o in scan_result.out_of_zone[:35]]
     )
-    if not candidatos:
-        logger.info("[DISCOVERY] Nenhum candidato em entry/watch. Pipeline encerrado.")
-        return
 
-    # ──────────────────────────────────────────────────────────────────
-    # 5. DISCOVERY / RANKING + PLAYBOOK VALIDATION
-    # ──────────────────────────────────────────────────────────────────
-    try:
-        discovery_res = scan_opportunities(
-            symbols=candidatos,
-            timeframe=DEFAULT_SCAN_LTF,
-            top_n=20,  # Pegar mais candidatos para alimentar risk/decision
-        )
-        opportunities = discovery_res.get("opportunities", [])
-        no_edge = discovery_res.get("no_edge", [])
-        disc_errors = discovery_res.get("errors", {})
-
-        cycle.discovery_count = len(candidatos)
-        cycle.playbook_valid_count = len(opportunities)
-
-        if disc_errors:
-            cycle.errors_count += len(disc_errors)
-            cycle.error_summary["discovery_errors"] = disc_errors
-
-        # Registrar sem-edge para auditoria
-        for ne in no_edge:
-            session.add(CandidateSnapshot(
-                cycle_id=cycle.id,
-                symbol=ne["symbol"],
-                stage="discovery",
-                status="no_edge",
-                rejection_reason=ne.get("reason", "Sem playbook compatível"),
-            ))
-
-        logger.info(
-            f"[DISCOVERY] Candidates: {len(candidatos)} | "
-            f"Opportunities: {len(opportunities)} | "
-            f"No Edge: {len(no_edge)} | "
-            f"Errors: {len(disc_errors)}"
-        )
-
-    except Exception as exc:
-        logger.error(f"Falha durante Discovery: {exc}")
-        cycle.error_summary["discovery_fatal"] = str(exc)
-        cycle.errors_count += 1
-        return
-
-    if not opportunities:
-        logger.info("[PIPELINE] Sem oportunidades após Discovery. Pipeline encerrado.")
-        return
-
-    # ──────────────────────────────────────────────────────────────────
-    # 6. RISK ENGINE + DECISION ENGINE + SETUP UPSERT
-    # ──────────────────────────────────────────────────────────────────
-    # Buscar conta de risco (ou criar se não existe)
-    try:
-        account = get_or_create_account(session, "default", starting_capital=10000.0)
-    except Exception as exc:
-        logger.error(f"Falha ao obter conta de risco: {exc}")
-        cycle.error_summary["account_error"] = str(exc)
-        cycle.errors_count += 1
-        return
-
-    risk_limits = build_risk_limits(account)
-
-    for opp in opportunities:
-        symbol = opp.get("symbol", "UNKNOWN")
+    if candidatos:
+        # ──────────────────────────────────────────────────────────────────
+        # 5. DISCOVERY / RANKING + PLAYBOOK VALIDATION (76 PLAYBOOKS)
+        # ──────────────────────────────────────────────────────────────────
         try:
-            direction = opp["direction"]
-            corr_group = opp.get("correlated_with")
-
-            # Risk Engine
-            risk_state = build_risk_state(session, account, correlation_group=corr_group)
-            trade = ProposedTrade(
-                asset=symbol,
-                direction=direction,
-                requested_risk_pct=1.0,  # Default 1% — respeita config da conta
-                correlation_group=corr_group,
+            discovery_res = scan_opportunities(
+                symbols=candidatos,
+                timeframe=DEFAULT_SCAN_LTF,
+                top_n=30,  # Avaliar candidatos para alimentar risk/decision
             )
-            risk_result = evaluate_trade_risk(trade, risk_state, risk_limits)
+            opportunities = discovery_res.get("opportunities", [])
+            no_edge = discovery_res.get("no_edge", [])
+            disc_errors = discovery_res.get("errors", {})
 
-            # Decision Engine
-            entry_quality = _determine_entry_quality(opp.get("distance_to_zone_pct"))
-            decision = evaluate_decision(
-                direction=direction,
-                overall_score=opp.get("overall", opp.get("score", {}).get("overall", 0)),
-                risk_decision=risk_result.decision,
-                setup_status="UNKNOWN",
-                entry_quality=entry_quality,
-            )
+            cycle.discovery_count = len(candidatos)
+            cycle.playbook_valid_count = len(opportunities)
 
-            # Se rejeitado estritamente pelo Risk Engine por limites de conta
-            if risk_result.decision == "REJECTED":
+            if disc_errors:
+                cycle.errors_count += len(disc_errors)
+                cycle.error_summary["discovery_errors"] = disc_errors
+
+            # Registrar sem-edge para auditoria
+            for ne in no_edge:
                 session.add(CandidateSnapshot(
                     cycle_id=cycle.id,
-                    symbol=symbol,
-                    stage="risk",
-                    score=opp.get("overall", opp.get("score", {}).get("overall")),
-                    status="REJECTED",
-                    rejection_reason="; ".join(risk_result.reasons),
+                    symbol=ne["symbol"],
+                    stage="discovery",
+                    status="no_edge",
+                    rejection_reason=ne.get("reason", "Sem playbook compatível"),
                 ))
-                continue
 
-            cycle.quality_valid_count += 1
-
-            # Determinar status inicial do setup (WATCH se aguardando, READY se entrada imediata)
-            initial_status = "READY" if decision.decision in ("LONG_NOW", "SHORT_NOW") else WATCH
-
-            # Construir SetupCandidate para upsert
-            entry_zone_data = opp.get("entry_zone")
-            entry_zone_obj = None
-            if entry_zone_data and isinstance(entry_zone_data, dict):
-                entry_zone_obj = EntryZone(
-                    low=entry_zone_data["low"],
-                    high=entry_zone_data["high"],
-                )
-
-            candidate = SetupCandidate(
-                asset=symbol,
-                direction=direction,
-                strategy=opp.get("playbook", "unknown"),
-                status=initial_status,
-                entry_zone=entry_zone_obj,
-                stop=opp.get("stop"),
-                tp1=opp.get("target"),
-                rr=opp.get("rr"),
-                score=opp.get("overall", opp.get("score", {}).get("overall")),
-                reason=f"Auto-discovery | Decision: {decision.decision} | Conviction: {decision.conviction}",
+            logger.info(
+                f"[DISCOVERY] Candidates: {len(candidatos)} | "
+                f"Opportunities: {len(opportunities)} | "
+                f"No Edge: {len(no_edge)} | "
+                f"Errors: {len(disc_errors)}"
             )
 
-            upsert_res = upsert_setup(session, candidate)
-            if upsert_res.created:
-                cycle.setups_created += 1
-                logger.info(f"[SETUP NEW] {symbol} {direction} ({initial_status}) via {opp.get('playbook')}")
-                # Notificar Telegram para decisões confirmadas (READY, LONG_NOW, SHORT_NOW)
-                if decision.decision in ("LONG_NOW", "SHORT_NOW") or initial_status == "READY":
-                    try:
-                        sent = process_new_setup(session, upsert_res.record, decision.to_dict())
-                        if sent:
-                            cycle.signals_sent += 1
-                    except Exception as exc:
-                        logger.error(f"Erro ao enviar notificação de entrada para {symbol}: {exc}")
-            elif upsert_res.change_type != "unchanged":
-                cycle.setups_updated += 1
-                logger.info(f"[SETUP UPDATE] {symbol} {direction} → {upsert_res.change_type}")
-
         except Exception as exc:
-            logger.error(f"Erro ao processar {symbol}: {exc}")
+            logger.error(f"Falha durante Discovery: {exc}")
+            cycle.error_summary["discovery_fatal"] = str(exc)
             cycle.errors_count += 1
-            cycle.error_summary[f"process_{symbol}"] = str(exc)
+            opportunities = []
+
+        # ──────────────────────────────────────────────────────────────────
+        # 6. RISK ENGINE + DECISION ENGINE + SETUP UPSERT
+        # ──────────────────────────────────────────────────────────────────
+        if opportunities:
+            try:
+                account = get_or_create_account(session, "default", starting_capital=10000.0)
+                risk_limits = build_risk_limits(account)
+
+                for opp in opportunities:
+                    symbol = opp.get("symbol", "UNKNOWN")
+                    try:
+                        direction = opp["direction"]
+                        corr_group = opp.get("correlated_with")
+
+                        # Risk Engine
+                        risk_state = build_risk_state(session, account, correlation_group=corr_group)
+                        trade = ProposedTrade(
+                            asset=symbol,
+                            direction=direction,
+                            requested_risk_pct=1.0,
+                            correlation_group=corr_group,
+                        )
+                        risk_result = evaluate_trade_risk(trade, risk_state, risk_limits)
+
+                        # Decision Engine
+                        entry_quality = _determine_entry_quality(opp.get("distance_to_zone_pct"))
+                        overall_score_val = opp.get("overall", opp.get("score", {}).get("overall", 0)) if isinstance(opp.get("score"), dict) else opp.get("score", {}).overall if hasattr(opp.get("score"), "overall") else opp.get("overall", 70)
+                        decision = evaluate_decision(
+                            direction=direction,
+                            overall_score=overall_score_val,
+                            risk_decision=risk_result.decision,
+                            setup_status="UNKNOWN",
+                            entry_quality=entry_quality,
+                        )
+
+                        # Se rejeitado estritamente pelo Risk Engine por limites de conta
+                        if risk_result.decision == "REJECTED":
+                            session.add(CandidateSnapshot(
+                                cycle_id=cycle.id,
+                                symbol=symbol,
+                                stage="risk",
+                                score=overall_score_val,
+                                status="REJECTED",
+                                rejection_reason="; ".join(risk_result.reasons),
+                            ))
+                            continue
+
+                        cycle.quality_valid_count += 1
+
+                        # Determinar status inicial do setup (WATCH se aguardando, READY se entrada imediata)
+                        initial_status = "READY" if decision.decision in ("LONG_NOW", "SHORT_NOW") else WATCH
+
+                        # Construir SetupCandidate para upsert
+                        entry_zone_data = opp.get("entry_zone")
+                        entry_zone_obj = None
+                        if entry_zone_data and isinstance(entry_zone_data, dict):
+                            entry_zone_obj = EntryZone(
+                                low=entry_zone_data["low"],
+                                high=entry_zone_data["high"],
+                            )
+
+                        candidate = SetupCandidate(
+                            asset=symbol,
+                            direction=direction,
+                            strategy=opp.get("playbook", "unknown"),
+                            status=initial_status,
+                            entry_zone=entry_zone_obj,
+                            stop=opp.get("stop"),
+                            tp1=opp.get("target"),
+                            rr=opp.get("rr"),
+                            score=overall_score_val,
+                            reason=f"Auto-discovery | Decision: {decision.decision} | Conviction: {decision.conviction}",
+                        )
+
+                        upsert_res = upsert_setup(session, candidate)
+                        if upsert_res.created:
+                            cycle.setups_created += 1
+                            logger.info(f"[SETUP NEW] {symbol} {direction} ({initial_status}) via {opp.get('playbook')}")
+                            # Notificar Telegram para decisões confirmadas (READY, LONG_NOW, SHORT_NOW)
+                            if decision.decision in ("LONG_NOW", "SHORT_NOW") or initial_status == "READY":
+                                try:
+                                    sent = process_new_setup(session, upsert_res.record, decision.to_dict())
+                                    if sent:
+                                        cycle.signals_sent += 1
+                                except Exception as exc:
+                                    logger.error(f"Erro ao enviar notificação de entrada para {symbol}: {exc}")
+                        elif upsert_res.change_type != "unchanged":
+                            cycle.setups_updated += 1
+                            logger.info(f"[SETUP UPDATE] {symbol} {direction} → {upsert_res.change_type}")
+
+                    except Exception as exc:
+                        logger.error(f"Erro ao processar {symbol}: {exc}")
+                        cycle.errors_count += 1
+                        cycle.error_summary[f"process_{symbol}"] = str(exc)
+
+            except Exception as exc:
+                logger.error(f"Falha na camada de risco/decisão: {exc}")
+                cycle.error_summary["risk_engine_error"] = str(exc)
+                cycle.errors_count += 1
 
     session.flush()
 
