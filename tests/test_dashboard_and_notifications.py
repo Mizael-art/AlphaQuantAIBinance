@@ -96,7 +96,7 @@ def test_kline_cache():
 
 
 def test_notifications_dedup_and_formatting():
-    with session_scope() as session:
+    with session_scope(url="sqlite:///:memory:") as session:
         # Criar setup de teste
         setup = SetupRecord(
             asset="SOLUSDT",
