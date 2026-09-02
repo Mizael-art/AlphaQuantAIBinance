@@ -54,7 +54,7 @@ def get_engine(url: str | None = None) -> Engine:
     sem recriar conexões a cada chamada.
     """
     resolved_url = _normalize_url(url or os.environ.get("DATABASE_URL") or _DEFAULT_LOCAL_URL)
-    connect_args = {"check_same_thread": False} if resolved_url.startswith("sqlite") else {}
+    connect_args = {"check_same_thread": False, "timeout": 30} if resolved_url.startswith("sqlite") else {}
     engine = create_engine(resolved_url, connect_args=connect_args, future=True)
     Base.metadata.create_all(engine)
     return engine
