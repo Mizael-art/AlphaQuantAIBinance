@@ -128,37 +128,91 @@ def get_signals(
 
 @router.get("/dashboard/performance")
 def get_dashboard_performance() -> dict:
-    """Métricas de performance baseadas nos setups completos."""
+    """Métricas consolidadas de performance (Win Rate, Profit Factor, Expectancy, Average R, Drawdown)."""
     with session_scope() as session:
-        terminal_statuses = ("COMPLETED", "TP1", "TP2", "TP3", "INVALIDATED")
+        terminal_statuses = ("COMPLETED", "INVALIDATED", "CLOSED", "EXPIRED", "TP1", "TP2", "TP3")
         stmt = select(SetupRecord).where(SetupRecord.status.in_(terminal_statuses))
-        completed = session.execute(stmt).scalars().all()
+        records = session.execute(stmt).scalars().all()
 
-        if not completed:
+        total = len(records)
+        if total == 0:
             return {
                 "total_trades": 0,
                 "wins": 0,
                 "losses": 0,
+                "breakevens": 0,
                 "win_rate": 0.0,
+                "win_rate_pct": 0.0,
+                "average_r": 0.0,
+                "profit_factor": 0.0,
+                "expectancy_r": 0.0,
+                "total_pnl_pct": 0.0,
+                "max_drawdown_r": 0.0,
+                "sample_confidence": "INSUFFICIENT_SAMPLE",
                 "disclaimer": "Sem trades finalizados para calcular performance.",
             }
 
-        wins = [s for s in completed if s.status in ("COMPLETED", "TP1", "TP2", "TP3")]
-        losses = [s for s in completed if s.status == "INVALIDATED"]
+        wins = 0
+        losses = 0
+        be = 0
+        r_multiples = []
+        pnl_pcts = []
+        gross_profit_r = 0.0
+        gross_loss_r = 0.0
 
-        total = len(completed)
-        win_count = len(wins)
-        loss_count = len(losses)
-        win_rate = round(win_count / total * 100, 1) if total > 0 else 0.0
+        for r in records:
+            r_val = r.realized_r_multiple
+            if r_val is None:
+                r_val = 1.0 if r.status in ("COMPLETED", "TP1", "TP2", "TP3") else -1.0
+
+            r_multiples.append(r_val)
+            pnl_pcts.append(r.realized_pnl_pct or (r_val * 2.0))
+
+            if r_val > 0.1:
+                wins += 1
+                gross_profit_r += r_val
+            elif r_val < -0.1:
+                losses += 1
+                gross_loss_r += abs(r_val)
+            else:
+                be += 1
+
+        win_rate = (wins / total * 100) if total > 0 else 0.0
+        avg_r = sum(r_multiples) / total if total > 0 else 0.0
+        profit_factor = (gross_profit_r / gross_loss_r) if gross_loss_r > 0 else (gross_profit_r if gross_profit_r > 0 else 1.0)
+        expectancy = (win_rate / 100.0 * (gross_profit_r / max(1, wins))) - ((losses / total) * (gross_loss_r / max(1, losses))) if total > 0 else 0.0
+
+        # Max Drawdown
+        peak = 0.0
+        cum_r = 0.0
+        max_dd = 0.0
+        for r_val in r_multiples:
+            cum_r += r_val
+            if cum_r > peak:
+                peak = cum_r
+            dd = peak - cum_r
+            if dd > max_dd:
+                max_dd = dd
+
+        confidence = "HIGH_CONFIDENCE" if total >= 100 else ("MODERATE_CONFIDENCE" if total >= 30 else "LOW_SAMPLE")
 
         return {
             "total_trades": total,
-            "wins": win_count,
-            "losses": loss_count,
-            "win_rate": win_rate,
-            "by_strategy": _group_by_strategy(completed),
+            "wins": wins,
+            "losses": losses,
+            "breakevens": be,
+            "win_rate": round(win_rate, 2),
+            "win_rate_pct": round(win_rate, 2),
+            "average_r": round(avg_r, 2),
+            "profit_factor": round(profit_factor, 2),
+            "expectancy_r": round(expectancy, 2),
+            "total_pnl_pct": round(sum(pnl_pcts), 2),
+            "max_drawdown_r": round(max_dd, 2),
+            "sample_confidence": confidence,
+            "by_strategy": _group_by_strategy(records),
             "disclaimer": "Performance baseada em setups finalizados pelo sistema. Não representa trades executados em conta real.",
         }
+
 
 
 @router.get("/dashboard/heatmap")
@@ -648,4 +702,284 @@ def get_playbooks_catalog() -> dict:
         "total_playbooks": len(PLAYBOOK_CATALOG),
         "playbooks": [p.to_dict() for p in PLAYBOOK_CATALOG],
     }
+
+
+# ======================================================================
+# STRATEGY ENGINE V2 — PERFORMANCE & TRACKING ENDPOINTS
+# ======================================================================
+
+@router.get("/dashboard/open-trades")
+def get_open_trades() -> dict:
+    """Retorna todas as operações abertas / ativas com acompanhamento de PnL flutuante em tempo real."""
+    from api.market_data import MarketData
+    md = MarketData()
+
+    with session_scope() as session:
+        open_setups = list_setups(session, exclude_terminal=True)
+        trades = []
+
+        for s in open_setups:
+            current_price = s.entry_price or s.entry_zone_low or 0.0
+            try:
+                quote = md.get_current_price(symbol=s.asset)
+                if quote:
+                    current_price = quote
+            except Exception:
+                pass
+
+            entry_p = s.entry_price or s.entry_zone_low or current_price
+            floating_pnl = 0.0
+            floating_r = 0.0
+
+            if entry_p > 0:
+                if s.direction == "long":
+                    floating_pnl = (current_price - entry_p) / entry_p * 100
+                else:
+                    floating_pnl = (entry_p - current_price) / entry_p * 100
+
+                risk_dist = abs(entry_p - s.stop) if (s.stop and entry_p) else (0.01 * entry_p)
+                if risk_dist > 0:
+                    floating_r = (current_price - entry_p) / risk_dist if s.direction == "long" else (entry_p - current_price) / risk_dist
+
+            dist_to_sl = (abs(current_price - s.stop) / current_price * 100) if (s.stop and current_price > 0) else None
+            dist_to_tp1 = (abs(s.tp1 - current_price) / current_price * 100) if (s.tp1 and current_price > 0) else None
+
+            trades.append({
+                "id": s.id,
+                "asset": s.asset,
+                "direction": s.direction.upper(),
+                "strategy": s.strategy,
+                "status": s.status,
+                "entry_price": entry_p,
+                "current_price": current_price,
+                "stop_loss": s.stop,
+                "tp1": s.tp1,
+                "tp2": s.tp2,
+                "tp3": s.tp3,
+                "floating_pnl_pct": round(floating_pnl, 2),
+                "floating_r": round(floating_r, 2),
+                "distance_to_sl_pct": round(dist_to_sl, 2) if dist_to_sl is not None else None,
+                "distance_to_tp1_pct": round(dist_to_tp1, 2) if dist_to_tp1 is not None else None,
+                "score": s.score,
+                "opened_at": s.opened_at.isoformat() if s.opened_at else s.created_at.isoformat(),
+            })
+
+        return {
+            "total_open_trades": len(trades),
+            "trades": trades,
+        }
+
+
+@router.get("/dashboard/trade-history")
+def get_trade_history(
+    asset: str | None = None,
+    direction: str | None = None,
+    strategy: str | None = None,
+    result: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict:
+    """Histórico de operações resolvidas com filtros e métricas individuais."""
+    with session_scope() as session:
+        stmt = select(SetupRecord).where(
+            SetupRecord.status.in_(("COMPLETED", "INVALIDATED", "CLOSED", "EXPIRED"))
+        )
+        if asset:
+            stmt = stmt.where(SetupRecord.asset == asset.upper())
+        if direction:
+            stmt = stmt.where(SetupRecord.direction == direction.lower())
+        if strategy:
+            stmt = stmt.where(SetupRecord.strategy == strategy)
+
+        stmt = stmt.order_by(desc(SetupRecord.closed_at), desc(SetupRecord.updated_at)).limit(limit)
+        records = session.execute(stmt).scalars().all()
+
+        trades = []
+        for r in records:
+            res_str = "WIN" if (r.realized_r_multiple and r.realized_r_multiple > 0) or r.status == "COMPLETED" else "LOSS"
+            if result and res_str.lower() != result.lower():
+                continue
+
+            trades.append({
+                "id": r.id,
+                "asset": r.asset,
+                "direction": r.direction.upper(),
+                "strategy": r.strategy,
+                "status": r.status,
+                "result": res_str,
+                "entry_price": r.entry_price or r.entry_zone_low,
+                "exit_price": r.exit_price,
+                "stop_loss": r.stop,
+                "tp1": r.tp1,
+                "tp2": r.tp2,
+                "tp3": r.tp3,
+                "pnl_pct": round(r.realized_pnl_pct or 0.0, 2),
+                "r_multiple": round(r.realized_r_multiple or (1.0 if res_str == "WIN" else -1.0), 2),
+                "exit_reason": r.exit_reason or ("TP" if res_str == "WIN" else "STOP"),
+                "duration_minutes": round(r.duration_minutes or 0.0, 1),
+                "score": r.score,
+                "opened_at": r.opened_at.isoformat() if r.opened_at else r.created_at.isoformat(),
+                "closed_at": r.closed_at.isoformat() if r.closed_at else r.updated_at.isoformat(),
+            })
+
+        return {
+            "total_trades": len(trades),
+            "trades": trades,
+        }
+
+
+
+
+@router.get("/dashboard/monthly")
+def get_monthly_performance() -> dict:
+    """Tabela de performance agregada por mês."""
+    with session_scope() as session:
+        stmt = select(SetupRecord).where(
+            SetupRecord.status.in_(("COMPLETED", "INVALIDATED", "CLOSED", "EXPIRED"))
+        )
+        records = session.execute(stmt).scalars().all()
+
+        months_dict: dict[str, list[SetupRecord]] = {}
+        for r in records:
+            dt = r.closed_at or r.updated_at
+            month_key = dt.strftime("%Y-%m") if dt else "2026-09"
+            months_dict.setdefault(month_key, []).append(r)
+
+        monthly_table = []
+        for m_key, recs in sorted(months_dict.items(), reverse=True):
+            m_total = len(recs)
+            m_wins = sum(1 for x in recs if (x.realized_r_multiple and x.realized_r_multiple > 0) or x.status == "COMPLETED")
+            m_losses = m_total - m_wins
+            m_pnl = sum(x.realized_pnl_pct or 0.0 for x in recs)
+            m_avg_r = sum(x.realized_r_multiple or 0.0 for x in recs) / m_total if m_total > 0 else 0.0
+
+            monthly_table.append({
+                "month": m_key,
+                "total_trades": m_total,
+                "wins": m_wins,
+                "losses": m_losses,
+                "win_rate_pct": round(m_wins / m_total * 100, 1) if m_total > 0 else 0.0,
+                "average_r": round(m_avg_r, 2),
+                "total_pnl_pct": round(m_pnl, 2),
+            })
+
+        return {
+            "total_months": len(monthly_table),
+            "monthly_performance": monthly_table,
+        }
+
+
+@router.get("/dashboard/strategy-performance")
+def get_strategy_performance() -> dict:
+    """Desempenho estatístico desagregado por cada uma das estratégias / playbooks."""
+    with session_scope() as session:
+        stmt = select(SetupRecord).where(
+            SetupRecord.status.in_(("COMPLETED", "INVALIDATED", "CLOSED", "EXPIRED"))
+        )
+        records = session.execute(stmt).scalars().all()
+
+        strat_dict: dict[str, list[SetupRecord]] = {}
+        for r in records:
+            strat_dict.setdefault(r.strategy, []).append(r)
+
+        strat_table = []
+        for strat_name, recs in strat_dict.items():
+            s_total = len(recs)
+            s_wins = sum(1 for x in recs if (x.realized_r_multiple and x.realized_r_multiple > 0) or x.status == "COMPLETED")
+            s_losses = s_total - s_wins
+            s_pnl = sum(x.realized_pnl_pct or 0.0 for x in recs)
+            s_avg_r = sum(x.realized_r_multiple or 0.0 for x in recs) / s_total if s_total > 0 else 0.0
+
+            strat_table.append({
+                "strategy": strat_name,
+                "sample_size": s_total,
+                "wins": s_wins,
+                "losses": s_losses,
+                "win_rate_pct": round(s_wins / s_total * 100, 1) if s_total > 0 else 0.0,
+                "average_r": round(s_avg_r, 2),
+                "total_pnl_pct": round(s_pnl, 2),
+                "tier": "A+" if s_avg_r > 1.0 and s_wins / max(1, s_total) > 0.6 else "A",
+            })
+
+        strat_table.sort(key=lambda x: x["sample_size"], reverse=True)
+        return {
+            "total_strategies_evaluated": len(strat_table),
+            "strategies": strat_table,
+        }
+
+
+@router.get("/dashboard/asset-performance")
+def get_asset_performance() -> dict:
+    """Desempenho desagregado por ativo (BTC, ETH, SOL, etc.)."""
+    with session_scope() as session:
+        stmt = select(SetupRecord).where(
+            SetupRecord.status.in_(("COMPLETED", "INVALIDATED", "CLOSED", "EXPIRED"))
+        )
+        records = session.execute(stmt).scalars().all()
+
+        asset_dict: dict[str, list[SetupRecord]] = {}
+        for r in records:
+            asset_dict.setdefault(r.asset, []).append(r)
+
+        asset_table = []
+        for sym, recs in asset_dict.items():
+            a_total = len(recs)
+            a_wins = sum(1 for x in recs if (x.realized_r_multiple and x.realized_r_multiple > 0) or x.status == "COMPLETED")
+            a_losses = a_total - a_wins
+            a_pnl = sum(x.realized_pnl_pct or 0.0 for x in recs)
+            a_avg_r = sum(x.realized_r_multiple or 0.0 for x in recs) / a_total if a_total > 0 else 0.0
+
+            asset_table.append({
+                "asset": sym,
+                "total_trades": a_total,
+                "wins": a_wins,
+                "losses": a_losses,
+                "win_rate_pct": round(a_wins / a_total * 100, 1) if a_total > 0 else 0.0,
+                "average_r": round(a_avg_r, 2),
+                "total_pnl_pct": round(a_pnl, 2),
+            })
+
+        asset_table.sort(key=lambda x: x["total_trades"], reverse=True)
+        return {
+            "total_assets": len(asset_table),
+            "assets": asset_table,
+        }
+
+
+@router.get("/dashboard/regime-performance")
+def get_regime_performance() -> dict:
+    """Desempenho desagregado por regime de mercado (Trending Up, Trending Down, Range, Compression)."""
+    with session_scope() as session:
+        stmt = select(SetupRecord).where(
+            SetupRecord.status.in_(("COMPLETED", "INVALIDATED", "CLOSED", "EXPIRED"))
+        )
+        records = session.execute(stmt).scalars().all()
+
+        regime_dict: dict[str, list[SetupRecord]] = {}
+        for r in records:
+            reg = r.regime or "TRENDING_UP"
+            regime_dict.setdefault(reg, []).append(r)
+
+        regime_table = []
+        for reg_name, recs in regime_dict.items():
+            r_total = len(recs)
+            r_wins = sum(1 for x in recs if (x.realized_r_multiple and x.realized_r_multiple > 0) or x.status == "COMPLETED")
+            r_losses = r_total - r_wins
+            r_pnl = sum(x.realized_pnl_pct or 0.0 for x in recs)
+            r_avg_r = sum(x.realized_r_multiple or 0.0 for x in recs) / r_total if r_total > 0 else 0.0
+
+            regime_table.append({
+                "regime": reg_name,
+                "total_trades": r_total,
+                "wins": r_wins,
+                "losses": r_losses,
+                "win_rate_pct": round(r_wins / r_total * 100, 1) if r_total > 0 else 0.0,
+                "average_r": round(r_avg_r, 2),
+                "total_pnl_pct": round(r_pnl, 2),
+            })
+
+        return {
+            "total_regimes": len(regime_table),
+            "regimes": regime_table,
+        }
+
 

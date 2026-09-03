@@ -60,18 +60,22 @@ class SetupRecord(Base):
 
     reason_for_change: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
+    # Campos de execução real e performance (Strategy Engine V2)
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)  # TP1, TP2, TP3, STOP, INVALIDATED, EXPIRED
+    realized_pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
+    regime: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
     status_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     __table_args__ = (
-        # Documento 2, seção 15 (Setup Memory): não duplicar um setup pro
-        # mesmo ativo+direção+estratégia enquanto ele estiver em aberto --
-        # a unicidade real (só entre estados não-terminais) é garantida em
-        # código (`setups/memory.py`), não pelo banco, porque SQL puro não
-        # expressa bem "único apenas quando status IN (...)" de forma
-        # portável entre SQLite e Postgres. Este índice só acelera a busca
-        # que o `memory.py` já precisa fazer.
         Index("ix_setups_lookup", "asset", "direction", "strategy", "status"),
     )
 
@@ -98,10 +102,20 @@ class SetupRecord(Base):
             "invalidation": self.invalidation,
             "expiration": self.expiration.isoformat() if self.expiration else None,
             "reason_for_change": self.reason_for_change,
+            "entry_price": self.entry_price,
+            "exit_price": self.exit_price,
+            "exit_reason": self.exit_reason,
+            "realized_pnl_pct": self.realized_pnl_pct,
+            "realized_r_multiple": self.realized_r_multiple,
+            "regime": self.regime,
+            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
+            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+            "duration_minutes": self.duration_minutes,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
             "status_changed_at": self.status_changed_at.isoformat(),
         }
+
 
 
 class AccountState(Base):

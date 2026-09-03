@@ -46,6 +46,34 @@ def _normalize_url(url: str) -> str:
     return url
 
 
+def _sync_schema_columns(engine: Engine, resolved_url: str) -> None:
+    """Adiciona colunas novas em tabelas existentes caso não tenham sido criadas."""
+    if resolved_url.startswith("sqlite"):
+        try:
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                res = conn.execute(text("PRAGMA table_info(setups)"))
+                existing = {row[1] for row in res.fetchall()}
+                if existing:
+                    new_cols = {
+                        "entry_price": "FLOAT",
+                        "exit_price": "FLOAT",
+                        "exit_reason": "VARCHAR(32)",
+                        "realized_pnl_pct": "FLOAT",
+                        "realized_r_multiple": "FLOAT",
+                        "regime": "VARCHAR(32)",
+                        "opened_at": "DATETIME",
+                        "closed_at": "DATETIME",
+                        "duration_minutes": "FLOAT",
+                    }
+                    for col, ctype in new_cols.items():
+                        if col not in existing:
+                            conn.execute(text(f"ALTER TABLE setups ADD COLUMN {col} {ctype}"))
+                    conn.commit()
+        except Exception:
+            pass
+
+
 @lru_cache(maxsize=8)
 def get_engine(url: str | None = None) -> Engine:
     """
@@ -57,7 +85,9 @@ def get_engine(url: str | None = None) -> Engine:
     connect_args = {"check_same_thread": False, "timeout": 30} if resolved_url.startswith("sqlite") else {}
     engine = create_engine(resolved_url, connect_args=connect_args, future=True)
     Base.metadata.create_all(engine)
+    _sync_schema_columns(engine, resolved_url)
     return engine
+
 
 
 def get_sessionmaker(url: str | None = None) -> sessionmaker[Session]:

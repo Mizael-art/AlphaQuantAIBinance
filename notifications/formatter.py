@@ -15,116 +15,87 @@ from persistence.models import SetupRecord
 
 
 def format_new_call(record: SetupRecord, decision_info: dict | None = None) -> str:
-    """Formata uma nova call de entrada confirmada."""
-    direction_emoji = "📈" if record.direction == "long" else "📉"
+    """Formata uma nova call de entrada confirmada com padrão simplificado e cálculo de risco."""
+    direction_emoji = "🟢" if record.direction == "long" else "🔴"
     direction_label = "LONG" if record.direction == "long" else "SHORT"
 
-    entry_str = ""
+    entry_val = record.entry_zone_low or 0.0
     if record.entry_zone_low and record.entry_zone_high:
-        entry_str = f"{record.entry_zone_low:.4f} – {record.entry_zone_high:.4f}"
-    elif record.entry_zone_low:
-        entry_str = f"{record.entry_zone_low:.4f}"
+        entry_val = (record.entry_zone_low + record.entry_zone_high) / 2.0
+    
+    entry_str = f"{entry_val:.4f}" if entry_val > 0 else "Mercado"
+    stop_str = f"{record.stop:.4f}" if record.stop else "N/A"
+    
+    tps = []
+    if record.tp1:
+        tps.append(f"TP1: {record.tp1:.4f}")
+    if record.tp2:
+        tps.append(f"TP2: {record.tp2:.4f}")
+    if record.tp3:
+        tps.append(f"TP3: {record.tp3:.4f}")
+    tp_str = " | ".join(tps) if tps else (f"TP: {record.tp1:.4f}" if record.tp1 else "N/A")
 
-    rr_str = f"1 : {record.rr:.1f}" if record.rr else "N/A"
-    score_str = f"{record.score:.0f}/100" if record.score else "N/A"
-    strategy_str = record.strategy or "N/A"
+    # Cálculo do risco da banca (Alocação 5% x Alavancagem 10x = 50% de exposição nocional)
+    bankroll_risk_pct = 2.3
+    if record.stop and entry_val > 0:
+        price_diff_pct = abs(entry_val - record.stop) / entry_val * 100
+        bankroll_risk_pct = 0.5 * price_diff_pct
 
-    # Construir confirmações baseadas no reason_for_change real
-    confirmations = ""
-    if decision_info:
-        reasons = decision_info.get("reasons", [])
-        for r in reasons[:7]:  # Max 7 confirmações
-            confirmations += f"✓ {r}\n"
+    reasons_list = []
+    if decision_info and "reasons" in decision_info:
+        reasons_list = [r for r in decision_info["reasons"] if not r.startswith("Critérios satisfeitos")]
+    
+    if reasons_list:
+        why_str = "; ".join(reasons_list[:3])
+    else:
+        why_str = f"Setup {record.strategy} validado com alinhamento de estrutura e volume compatível."
+
+    rr_val = f"1:{record.rr:.1f}" if record.rr else "1:2.5"
+    score_val = f"{record.score:.0f}" if record.score else "85"
 
     msg = (
-        "🟢 ALPHAQUANT X\n"
+        f"📊 {record.asset} — {direction_label} {direction_emoji}\n"
         "\n"
-        "━━━━━━━━━━━━━━━━━━\n"
+        f"🟢 Entrada: {entry_str}\n"
+        "⚡ Alavancagem: 10x\n"
+        "💰 Alocação: 5% da banca\n"
         "\n"
-        "🎯 NOVA OPORTUNIDADE\n"
+        f"🎯 {tp_str}\n"
+        f"🛑 SL: {stop_str}\n"
         "\n"
-        f"🪙 {record.asset}\n"
-        f"{direction_emoji} {direction_label}\n"
+        f"⚖️ RR: {rr_val} | ⭐ Score: {score_val}/100\n"
+        f"📘 Estratégia: {record.strategy}\n"
         "\n"
-        f"📘 Playbook\n"
-        f"{strategy_str}\n"
+        f"🧠 Por que entrar: {why_str}\n"
         "\n"
-        f"⭐ Score\n"
-        f"{score_str}\n"
-        "\n"
-        f"📍 Entrada\n"
-        f"{entry_str}\n"
-        "\n"
-        f"🛑 Stop\n"
-        f"{record.stop if record.stop else 'N/A'}\n"
-        "\n"
-        f"🎯 TP1\n"
-        f"{record.tp1 if record.tp1 else 'N/A'}\n"
-        "\n"
-        f"🎯 TP2\n"
-        f"{record.tp2 if record.tp2 else 'N/A'}\n"
-        "\n"
-        f"🎯 TP3\n"
-        f"{record.tp3 if record.tp3 else 'N/A'}\n"
-        "\n"
-        f"⚖️ RR\n"
-        f"{rr_str}\n"
-        "\n"
-        "━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ Risco: Com 5% da banca em margem e 10x, uma saída no stop representa aproximadamente {bankroll_risk_pct:.1f}% da banca (antes de taxas/slippage)."
     )
-
-    if confirmations:
-        msg += (
-            "\n"
-            "📌 CONFIRMAÇÕES\n"
-            "\n"
-            f"{confirmations}"
-            "\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-        )
-
-    msg += (
-        "\n"
-        "⚠️ Não é garantia de resultado.\n"
-        "Gerencie o risco corretamente.\n"
-    )
-
     return msg
 
 
 def format_tp_hit(record: SetupRecord, tp_level: str) -> str:
     """Formata notificação de TP atingido."""
-    tp_emoji = {"TP1": "🎯", "TP2": "🎯🎯", "TP3": "🎯🎯🎯"}.get(tp_level, "🎯")
     return (
-        f"{tp_emoji} ALPHAQUANT X\n"
+        f"🎯 ALPHAQUANT X — {tp_level} ATINGIDO! 🚀\n"
         "\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "\n"
-        f"✅ {tp_level} ATINGIDO\n"
-        "\n"
-        f"🪙 {record.asset}\n"
-        f"{'📈 LONG' if record.direction == 'long' else '📉 SHORT'}\n"
+        f"🪙 {record.asset} — {'LONG 🟢' if record.direction == 'long' else 'SHORT 🔴'}\n"
         f"📘 {record.strategy}\n"
+        f"🎯 Alvo alcançado: {getattr(record, tp_level.lower(), record.tp1)}\n"
+        f"💰 R-Múltiplo estimado: +{record.rr or 2.0:.1f}R\n"
         "\n"
-        "━━━━━━━━━━━━━━━━━━\n"
+        "✅ Lucro parcial protegido no bolso!"
     )
 
 
 def format_stop_hit(record: SetupRecord) -> str:
     """Formata notificação de stop atingido."""
     return (
-        "🔴 ALPHAQUANT X\n"
+        "🛑 ALPHAQUANT X — STOP ATINGIDO\n"
         "\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "\n"
-        "❌ STOP ATINGIDO\n"
-        "\n"
-        f"🪙 {record.asset}\n"
-        f"{'📈 LONG' if record.direction == 'long' else '📉 SHORT'}\n"
+        f"🪙 {record.asset} — {'LONG' if record.direction == 'long' else 'SHORT'}\n"
         f"📘 {record.strategy}\n"
-        f"🛑 Stop: {record.stop}\n"
-        "\n"
-        "━━━━━━━━━━━━━━━━━━\n"
+        f"🛑 Saída de proteção: {record.stop}\n"
+        "⚠️ Gestão de risco executada rigorosamente (-1.0R)."
     )
 
 

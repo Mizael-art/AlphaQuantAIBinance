@@ -90,6 +90,33 @@ def run_monitoring_cycle(session: Session, market_data: MarketData | None = None
         record.status_changed_at = now
         record.reason_for_change = update.reason
 
+        # Inicializar abertura do trade
+        if not record.entry_price and record.status in ("NEAR_ENTRY", "READY", "TRIGGERED", "ACTIVE"):
+            record.entry_price = quote
+            record.opened_at = now
+
+        # Calcular encerramento e resultado financeiro real
+        if update.new_status in ("COMPLETED", "INVALIDATED", "TP1", "TP2", "TP3"):
+            entry_p = record.entry_price or record.entry_zone_low or quote
+            record.exit_price = quote
+            
+            risk_dist = abs(entry_p - record.stop) if (record.stop and entry_p) else (0.01 * entry_p)
+            if record.direction == "long":
+                pnl = (quote - entry_p) / entry_p * 100 if entry_p else 0.0
+                r_mult = (quote - entry_p) / risk_dist if risk_dist else 0.0
+            else:
+                pnl = (entry_p - quote) / entry_p * 100 if entry_p else 0.0
+                r_mult = (entry_p - quote) / risk_dist if risk_dist else 0.0
+
+            record.realized_pnl_pct = pnl
+            record.realized_r_multiple = r_mult
+
+            if update.new_status in ("COMPLETED", "INVALIDATED"):
+                record.closed_at = now
+                record.exit_reason = "STOP" if update.new_status == "INVALIDATED" else "TP"
+                if record.opened_at:
+                    record.duration_minutes = (now - record.opened_at).total_seconds() / 60.0
+
         updated.append({"setup_id": record.id, "asset": record.asset, "from": previous_status, "to": update.new_status, "reason": update.reason})
 
     session.flush()
