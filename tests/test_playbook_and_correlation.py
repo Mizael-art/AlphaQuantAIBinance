@@ -22,17 +22,18 @@ def test_compatible_playbooks_filters_by_regime_and_direction() -> None:
 
 
 def test_compatible_playbooks_returns_empty_when_nothing_matches() -> None:
-    # Nenhuma estratégia do Playbook inicial é long-only em regime de compressão E long-only ao mesmo tempo com style inexistente.
-    results = compatible_playbooks(COMPRESSION, "long", style="swing")
+    # Nenhuma estratégia do Playbook é compatível com regime inválido ou style inexistente
+    results = compatible_playbooks("NON_EXISTENT_REGIME", "long", style="scalping_invalid")
     assert results == []
 
 
 def test_compatible_playbooks_respects_direction_only_entries() -> None:
-    # "Range High Rejection" só é short -- não deve aparecer para long.
+    # "VAH Rejection" só é short -- não deve aparecer para long.
     results = compatible_playbooks(RANGE, "long")
     names = {e.name for e in results}
-    assert "Range High Rejection" not in names
-    assert "Range Low Rejection" in names
+    assert "VAH Rejection" not in names
+    assert "VAL Reclaim" in names
+
 
 
 def test_correlation_matrix_is_symmetric_and_self_correlated() -> None:

@@ -48,6 +48,7 @@ _MIN_SCORE_TO_CONSIDER: Final = 50.0
 _MIN_SCORE_FOR_ENTRY_NOW: Final = 65.0
 
 
+
 @dataclass(frozen=True, slots=True)
 class DecisionEligibilityResult:
     decision: str
@@ -59,9 +60,9 @@ class DecisionEligibilityResult:
 
 
 def _conviction_from_score(overall_score: float) -> str:
-    if overall_score >= 80:
+    if overall_score >= 85:
         return HIGH_CONVICTION
-    if overall_score >= 60:
+    if overall_score >= 70:
         return MEDIUM_CONVICTION
     return LOW_CONVICTION
 
@@ -73,20 +74,18 @@ def evaluate_decision(
     risk_decision: str,
     setup_status: str,
     entry_quality: str,
+    rr: float | None = None,
+    min_rr: float | None = None,
 ) -> DecisionEligibilityResult:
     """
     Args:
         direction: "long" | "short".
-        overall_score: Overall Opportunity Score (0-100, `scoring.engine`).
+        overall_score: Overall / Trade Score (0-100, `scoring.engine`).
         risk_decision: "APPROVED" | "REDUCED" | "REJECTED" (`risk.engine.evaluate_trade_risk`).
-        setup_status: status atual do Setup Lifecycle (`setups.lifecycle`)
-            -- ou `"UNKNOWN"` se não há setup persistido ainda (trade
-            ad-hoc, avaliado sob demanda).
-        entry_quality: "ENTRY_NOW" | "ENTRY_ON_PULLBACK" |
-            "ENTRY_ON_CONFIRMATION" | "ENTRY_ON_BREAKOUT" |
-            "ENTRY_ON_RETEST" | "NO_ENTRY" (Documento Master, seção 18) --
-            reflete se o preço já percorreu demais o movimento
-            (chase risk, seção 19) ou está numa zona executável agora.
+        setup_status: status atual do Setup Lifecycle (`setups.lifecycle`).
+        entry_quality: "ENTRY_NOW" | "ENTRY_ON_PULLBACK" | "ENTRY_ON_CONFIRMATION" | "NO_ENTRY".
+        rr: Relação Risco:Retorno calculada (None se ausente).
+        min_rr: Relação Risco:Retorno mínima exigida pelo Playbook/Sistema.
     """
     if direction not in ("long", "short"):
         raise ValueError("direction deve ser 'long' ou 'short'.")
@@ -95,47 +94,49 @@ def evaluate_decision(
 
     # 1) Risco sempre primeiro -- nunca contornável por score alto.
     if risk_decision == "REJECTED":
-        reasons.append("Risk Engine rejeitou o trade -- decisão de risco é absoluta, não é contornada por score.")
+        reasons.append("Risk Engine rejeitou o trade -- limites de risco ou exposição atingidos.")
         return DecisionEligibilityResult(REJECT, LOW_CONVICTION, reasons)
 
-    # 2) Sem edge suficiente -- reject direto, não "watch" por segurança.
+    # 2) HARD GATE DE RR — Rejeição incondicional se RR < min_rr
+    if rr is not None and min_rr is not None and rr < min_rr:
+        reasons.append(f"RR Real ({rr:.2f}) abaixo do mínimo obrigatório ({min_rr:.2f}) — rejeitado por Hard Gate.")
+        return DecisionEligibilityResult(REJECT, LOW_CONVICTION, reasons)
+
+    # 3) Sem edge suficiente -- reject direto, não "watch" por segurança.
     if overall_score < _MIN_SCORE_TO_CONSIDER:
-        reasons.append(f"Overall Opportunity Score ({overall_score:.1f}) abaixo do mínimo para considerar ({_MIN_SCORE_TO_CONSIDER}).")
+        reasons.append(f"Trade Score ({overall_score:.1f}) insuficiente — abaixo do mínimo de {_MIN_SCORE_TO_CONSIDER:.0f}.")
         return DecisionEligibilityResult(REJECT, LOW_CONVICTION, reasons)
 
     conviction = _conviction_from_score(overall_score)
 
-    # 3) Chase risk -- setup ainda bom, mas entrada perseguindo preço.
+    # 4) Chase risk / entrada esticada
     if entry_quality == "NO_ENTRY":
-        reasons.append("Entrada não executável no momento (chase risk ou ausência de zona clara) -- aguardar pullback.")
+        reasons.append("Entrada esticada / fora da zona ideal — aguardar pullback.")
         return DecisionEligibilityResult(WAIT_PULLBACK, conviction, reasons)
 
-    # 4) Setup ainda não chegou na zona/gatilho.
+    # 5) Setup ainda não chegou na zona/gatilho
     if setup_status in _WAITING_STATUSES:
-        reasons.append(f"Setup em '{setup_status}' -- ainda aguardando o gatilho definido.")
+        reasons.append(f"Setup em '{setup_status}' — aguardando gatilho de ativação.")
         return DecisionEligibilityResult(WAIT_TRIGGER, conviction, reasons)
 
-    # 5) Pronto e com score alto o suficiente -- decisão explícita
-    #    (Documento Master, seção 76: "não transformar um trade pronto
-    #    em 'continue observando'").
+    # 6) Pronto e com score qualificado para entrada imediata (LONG_NOW / SHORT_NOW)
     ready = setup_status in _ENTRY_READY_STATUSES or setup_status == "UNKNOWN"
     if ready and entry_quality == "ENTRY_NOW" and overall_score >= _MIN_SCORE_FOR_ENTRY_NOW:
-        reasons.append(f"Critérios satisfeitos: risco {risk_decision.lower()}, score {overall_score:.1f}, entrada executável agora.")
+        reasons.append(f"Critérios aprovados: risco {risk_decision.lower()}, Trade Score {overall_score:.1f}, entrada imediata na zona.")
         if risk_decision == "REDUCED":
-            reasons.append("Risco foi reduzido pelo Risk Engine -- aprovado com tamanho menor que o solicitado.")
+            reasons.append("Risco foi reduzido pelo Risk Engine -- tamanho de posição ajustado.")
+
         return DecisionEligibilityResult(LONG_NOW if direction == "long" else SHORT_NOW, conviction, reasons)
 
-    # 6) Pronto mas esperando confirmação/retest/breakout específico.
+    # 7) Aguardando confirmação ou pullback
     if entry_quality in ("ENTRY_ON_CONFIRMATION", "ENTRY_ON_BREAKOUT", "ENTRY_ON_RETEST"):
-        reasons.append(f"Aguardando confirmação específica antes de entrar ({entry_quality}).")
+        reasons.append(f"Aguardando confirmação de rompimento/reteste ({entry_quality}).")
         return DecisionEligibilityResult(WAIT_TRIGGER, conviction, reasons)
 
     if entry_quality == "ENTRY_ON_PULLBACK":
-        reasons.append("Estratégia pede entrada em pullback -- ainda não recuou o suficiente.")
+        reasons.append("Aguardando recuo técnico (pullback) até a zona de valor.")
         return DecisionEligibilityResult(WAIT_PULLBACK, conviction, reasons)
 
-    # 7) Nenhum dos gatilhos de decisão explícita bateu -- observar,
-    #    não por segurança, mas porque nenhum critério de entrada foi
-    #    satisfeito ainda.
-    reasons.append("Nenhum critério de entrada imediata satisfeito ainda -- acompanhar.")
+    reasons.append("Nenhum critério de entrada imediata satisfeito — acompanhar.")
     return DecisionEligibilityResult(WATCH, conviction, reasons)
+

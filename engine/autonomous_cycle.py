@@ -239,33 +239,56 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
                         )
                         risk_result = evaluate_trade_risk(trade, risk_state, risk_limits)
 
-                        # Decision Engine
+                        # Decision Engine com Hard Gate de RR e 3-Score
                         entry_quality = _determine_entry_quality(opp.get("distance_to_zone_pct"))
-                        overall_score_val = opp.get("overall", opp.get("score", {}).get("overall", 0)) if isinstance(opp.get("score"), dict) else opp.get("score", {}).overall if hasattr(opp.get("score"), "overall") else opp.get("overall", 70)
+                        
+                        score_data = opp.get("score")
+                        if isinstance(score_data, dict):
+                            trade_score_val = float(score_data.get("trade_score") or score_data.get("overall_opportunity_score") or opp.get("overall", 0.0))
+                        elif hasattr(score_data, "trade_score"):
+                            trade_score_val = float(score_data.trade_score)
+                        else:
+                            trade_score_val = float(opp.get("overall", 0.0))
+
+                        real_rr = float(opp.get("rr") or 0.0)
+
                         decision = evaluate_decision(
                             direction=direction,
-                            overall_score=overall_score_val,
+                            overall_score=trade_score_val,
                             risk_decision=risk_result.decision,
                             setup_status="UNKNOWN",
                             entry_quality=entry_quality,
+                            rr=real_rr,
+                            min_rr=2.0,
                         )
 
-                        # Se rejeitado estritamente pelo Risk Engine por limites de conta
-                        if risk_result.decision == "REJECTED":
+                        # Se rejeitado estritamente pelo Risk Engine por limites de conta ou Hard Gate
+                        if decision.decision == "REJECT" or risk_result.decision == "REJECTED":
                             session.add(CandidateSnapshot(
                                 cycle_id=cycle.id,
                                 symbol=symbol,
-                                stage="risk",
-                                score=overall_score_val,
+                                stage="quality_gate",
+                                score=trade_score_val,
                                 status="REJECTED",
-                                rejection_reason="; ".join(risk_result.reasons),
+                                rejection_reason="; ".join(decision.reasons or risk_result.reasons),
                             ))
                             continue
 
                         cycle.quality_valid_count += 1
 
-                        # Determinar status inicial do setup (WATCH se aguardando, READY se entrada imediata)
-                        initial_status = "READY" if decision.decision in ("LONG_NOW", "SHORT_NOW") else WATCH
+                        # FINAL TRADE QUALITY GATE:
+                        # Somente qualifica como READY para sinal imediato se atender a todos os critérios institucionais:
+                        # 1. Decisão LONG_NOW / SHORT_NOW
+                        # 2. Trade Score >= 75.0
+                        # 3. RR Real >= 2.0
+                        # 4. Risco Aprovado
+                        is_ready_for_telegram = (
+                            decision.decision in ("LONG_NOW", "SHORT_NOW")
+                            and trade_score_val >= 75.0
+                            and real_rr >= 2.0
+                            and risk_result.decision in ("APPROVED", "REDUCED")
+                        )
+                        initial_status = "READY" if is_ready_for_telegram else WATCH
 
                         # Construir SetupCandidate para upsert
                         entry_zone_data = opp.get("entry_zone")
@@ -284,17 +307,17 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
                             entry_zone=entry_zone_obj,
                             stop=opp.get("stop"),
                             tp1=opp.get("target"),
-                            rr=opp.get("rr"),
-                            score=overall_score_val,
-                            reason=f"Auto-discovery | Decision: {decision.decision} | Conviction: {decision.conviction}",
+                            rr=real_rr,
+                            score=trade_score_val,
+                            reason=f"Auto-discovery | Decision: {decision.decision} | Trade Score: {trade_score_val:.1f} | RR: {real_rr:.2f}",
                         )
 
                         upsert_res = upsert_setup(session, candidate)
                         if upsert_res.created:
                             cycle.setups_created += 1
-                            logger.info(f"[SETUP NEW] {symbol} {direction} ({initial_status}) via {opp.get('playbook')}")
-                            # Notificar Telegram para decisões confirmadas (READY, LONG_NOW, SHORT_NOW)
-                            if decision.decision in ("LONG_NOW", "SHORT_NOW") or initial_status == "READY":
+                            logger.info(f"[SETUP NEW] {symbol} {direction} ({initial_status}) via {opp.get('playbook')} (Score: {trade_score_val:.1f}, RR: {real_rr:.2f})")
+                            # Notificar Telegram EXCLUSIVAMENTE para trades que passaram pelo Final Trade Quality Gate
+                            if is_ready_for_telegram and initial_status == "READY":
                                 try:
                                     sent = process_new_setup(session, upsert_res.record, decision.to_dict())
                                     if sent:
@@ -304,6 +327,7 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
                         elif upsert_res.change_type != "unchanged":
                             cycle.setups_updated += 1
                             logger.info(f"[SETUP UPDATE] {symbol} {direction} → {upsert_res.change_type}")
+
 
                     except Exception as exc:
                         logger.error(f"Erro ao processar {symbol}: {exc}")

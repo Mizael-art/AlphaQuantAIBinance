@@ -143,6 +143,52 @@ def _estimate_trade_levels(
     return entry_zone, stop, target, distance_pct
 
 
+GLOBAL_MIN_RR: float = 2.0
+
+
+
+def _build_indicator_context(result: Any, df: Any, timeframe: str) -> dict[str, Any]:
+    """Extrai indicadores técnicos e níveis estruturais do DataFrame e do resultado de análise."""
+    price = float(df["close"].iloc[-1])
+    atr_series = calculate_atr(df, 14)
+    atr = float(atr_series.iloc[-1]) if len(atr_series) > 0 and atr_series.iloc[-1] == atr_series.iloc[-1] else price * 0.02
+
+    ema20 = float(df["close"].ewm(span=20).mean().iloc[-1])
+    ema50 = float(df["close"].ewm(span=50).mean().iloc[-1])
+    ema100 = float(df["close"].ewm(span=100).mean().iloc[-1])
+    ema200 = float(df["close"].ewm(span=200).mean().iloc[-1])
+
+    vol_avg = float(df["volume"].rolling(20).mean().iloc[-1]) if "volume" in df else 1.0
+    vol_current = float(df["volume"].iloc[-1]) if "volume" in df else 1.0
+    vol_expansion = vol_current > (vol_avg * 1.25)
+
+    swing_low = float(df["low"].tail(30).min())
+    swing_high = float(df["high"].tail(30).max())
+
+    return {
+        "price": price,
+        "atr": atr,
+        "ema20": ema20,
+        "ema50": ema50,
+        "ema100": ema100,
+        "ema200": ema200,
+        "rsi": result.rsi if hasattr(result, "rsi") else 50.0,
+        "macd": result.macd if hasattr(result, "macd") else 0.0,
+        "macd_signal": result.macd_signal if hasattr(result, "macd_signal") else 0.0,
+        "trend": result.trend,
+        "bos": result.structure.bos,
+        "choch": result.structure.choch,
+        "support": result.support,
+        "resistance": result.resistance,
+        "swing_low": swing_low,
+        "swing_high": swing_high,
+        "volume_avg": vol_avg,
+        "volume_current": vol_current,
+        "vol_expansion": vol_expansion,
+        "timeframe": timeframe,
+    }
+
+
 def scan_opportunities(
     symbols: list[str],
     btc_symbol: str = "BTCUSDT",
@@ -150,32 +196,24 @@ def scan_opportunities(
     style: str | None = None,
     timeframe: str = "1H",
     top_n: int = 5,
+    min_rr_filter: float | None = None,
     market_data: MarketData | None = None,
 ) -> dict[str, Any]:
     """
-    Args:
-        symbols: universo de ativos a varrer (não inclui `btc_symbol`
-            automaticamente -- some se quiser BTC no resultado também).
-        direction: "long" | "short" | None (None = considera as duas).
-        style: filtra o Playbook por estilo (`playbook.library.DAY_TRADE`
-            etc.) -- None considera qualquer estilo.
-        timeframe: timeframe usado tanto para a análise quanto para o
-            cálculo de regime/retorno (Documento Master, seção 19 --
-            multi-timeframe de verdade fica para uma fase futura).
-        top_n: quantas oportunidades retornar no máximo (Documento
-            Master, seção 21 -- "não mostrar 20 trades, quero seleção").
-
-    Returns:
-        dict com `opportunities` (lista rankeada) e `no_edge` (símbolos
-        sem estratégia compatível no regime atual, com o motivo --
-        nunca escondido, Documento Master seção 40).
+    Descoberta e rankeamento determinístico de oportunidades com:
+    - Execução real dos Playbooks determinísticos
+    - Hard Gate de RR Mínimo (max(GLOBAL_MIN_RR, playbook.min_rr))
+    - Target Engine estrutural (sem fabricação de alvos ou stops)
+    - Directional Conflict Resolution (LONG vs SHORT para o mesmo ativo)
+    - 3-Score Engine (Setup 60%, Entry 40%, Trade Score)
     """
     md = market_data or MarketData()
     directions_to_try = [direction] if direction else ["long", "short"]
+    effective_global_min_rr = min_rr_filter if min_rr_filter is not None else GLOBAL_MIN_RR
 
     btc_result, btc_regime, btc_return_pct, _btc_df = _asset_regime_and_context(btc_symbol, timeframe, md)
 
-    candidates: list[OpportunityResult] = []
+    raw_candidates_by_symbol: dict[str, list[OpportunityResult]] = {}
     no_edge: list[dict] = []
     returns_by_symbol: dict[str, Any] = {}
     errors: dict[str, str] = {}
@@ -187,11 +225,18 @@ def scan_opportunities(
         except InsufficientDataError as exc:
             errors[symbol] = str(exc)
             continue
+        except Exception as exc:
+            errors[symbol] = f"Erro na análise de {symbol}: {exc}"
+            continue
 
         returns_by_symbol[symbol] = df["close"].pct_change().dropna().reset_index(drop=True)
         rel_strength = classify_relative_strength(return_pct, btc_return_pct)
+        ctx = _build_indicator_context(result, df, timeframe)
+        ctx["regime"] = regime_result.regime
 
         found_for_symbol = False
+        symbol_candidates: list[OpportunityResult] = []
+
         for candidate_direction in directions_to_try:
             btc_context = (
                 None
@@ -202,64 +247,143 @@ def scan_opportunities(
             playbooks = compatible_playbooks(regime_result.regime, candidate_direction, style)
             if not playbooks:
                 continue
-            playbook: PlaybookEntry = playbooks[0]
-            found_for_symbol = True
 
-            entry_zone, stop, target, distance_pct = _estimate_trade_levels(
-                candidate_direction, result.price, result.support, result.resistance
-            )
-            rr = None
-            if stop is not None and target is not None and stop != result.price:
-                risk = abs(result.price - stop)
-                reward = abs(target - result.price)
-                rr = round(reward / risk, 2) if risk > 0 else None
+            for playbook in playbooks:
+                eval_res = playbook.evaluator(ctx)
+                if not eval_res.matched:
+                    continue
 
-            score = compute_opportunity_score(
-                trend=result.trend,
-                bos=result.structure.bos,
-                choch=result.structure.choch,
-                regime_compatible=True,
-                rr=rr,
-                distance_to_zone_pct=distance_pct,
-                volatility_bucket=regime_result.volatility_bucket,
-                btc_context=btc_context,
-                correlation_penalty=False,
-                playbook_stats=None,
-            )
+                # 1. Definir Níveis Técnicos Estruturais
+                price = result.price
+                atr = ctx["atr"]
+                entry_zone = eval_res.entry_zone
+                stop = eval_res.stop
+                target = eval_res.tp1
 
-            candidates.append(
-                OpportunityResult(
-                    symbol=symbol,
-                    direction=candidate_direction,
-                    playbook=playbook.name,
-                    style=playbook.style,
-                    regime=regime_result.regime,
-                    btc_context=btc_context,
-                    price=result.price,
-                    entry_zone=entry_zone,
-                    stop=stop,
-                    target=target,
-                    rr=rr,
+                # Se o evaluator não forneceu níveis estruturais completos, derivar do suporte/resistência real
+                if entry_zone is None or stop is None or target is None:
+                    est_entry, est_stop, est_target, _ = _estimate_trade_levels(
+                        candidate_direction, price, result.support, result.resistance
+                    )
+                    entry_zone = entry_zone or est_entry
+                    stop = stop or est_stop
+                    target = target or est_target
+
+                if entry_zone is None or stop is None or target is None:
+                    continue
+
+                entry_price = (entry_zone[0] + entry_zone[1]) / 2.0 if entry_zone else price
+                distance_pct = abs(price - entry_price) / price * 100 if price > 0 else 0.0
+
+                # 2. Calcular RR Real (Sem manipulação)
+                risk = abs(entry_price - stop)
+                reward = abs(target - entry_price)
+                if risk <= 0:
+                    continue
+                real_rr = round(reward / risk, 2)
+
+                # 3. HARD GATE DE RR — Rejeitar imediatamente se abaixo do mínimo exigido
+                required_rr = max(effective_global_min_rr, playbook.min_rr)
+                if real_rr < required_rr:
+                    continue  # REJECTED — RR abaixo do exigido pelo Playbook/Global
+
+                # 4. Verificar Obstáculo Imediato (Room to Run)
+                obstacle_ahead = False
+                if candidate_direction == "long":
+                    # Checar se há resistência antes de atingir 1x ATR do alvo
+                    near_res = [r for r in result.resistance if entry_price < r < target]
+                    if near_res and (near_res[0] - entry_price) < (0.8 * atr):
+                        obstacle_ahead = True
+                else:
+                    near_sup = [s for s in result.support if target < s < entry_price]
+                    if near_sup and (entry_price - near_sup[0]) < (0.8 * atr):
+                        obstacle_ahead = True
+
+                # 5. Calcular Scores na Arquitetura de 3 Scores
+                score = compute_opportunity_score(
+                    trend=result.trend,
+                    bos=result.structure.bos,
+                    choch=result.structure.choch,
+                    regime_compatible=True,
+                    rr=real_rr,
                     distance_to_zone_pct=distance_pct,
-                    score=score,
-                    correlated_with=None,
-                    notes=[*regime_result.notes, *(["RR não estimável -- sem zona oposta clara."] if rr is None else [])],
+                    volatility_bucket=regime_result.volatility_bucket,
+                    btc_context=btc_context,
+                    correlation_penalty=False,
+                    playbook_stats=None,
+                    volume_expansion=ctx["vol_expansion"],
+                    rsi_alignment=(result.rsi > 50 if candidate_direction == "long" else result.rsi < 50),
+                    obstacle_ahead=obstacle_ahead,
                 )
-            )
 
-        if not found_for_symbol:
-            no_edge.append(
-                {
-                    "symbol": symbol,
-                    "regime": regime_result.regime,
-                    "reason": f"Nenhuma estratégia do Playbook é compatível com o regime {regime_result.regime}"
-                    + (f" para direção '{direction}'" if direction else "")
-                    + (f" e estilo '{style}'" if style else "")
-                    + ".",
-                }
-            )
+                # Hard Gate de Trade Score: oportunidade precisa de nota consistente
+                if score.trade_score < 70.0:
+                    continue
 
-    candidates.sort(key=lambda c: c.score.overall, reverse=True)
+                symbol_candidates.append(
+                    OpportunityResult(
+                        symbol=symbol,
+                        direction=candidate_direction,
+                        playbook=playbook.name,
+                        style=playbook.style,
+                        regime=regime_result.regime,
+                        btc_context=btc_context,
+                        price=price,
+                        entry_zone=entry_zone,
+                        stop=stop,
+                        target=target,
+                        rr=real_rr,
+                        distance_to_zone_pct=distance_pct,
+                        score=score,
+                        correlated_with=None,
+                        notes=[
+                            *eval_res.reasons,
+                            *regime_result.notes,
+                            f"RR Real: {real_rr} (Mínimo exigido: {required_rr})",
+                        ],
+                    )
+                )
+                found_for_symbol = True
+                break  # Encontrou o melhor playbook para esta direção
+
+        if symbol_candidates:
+            # 6. DIRECTION RESOLUTION ENGINE — Desempate LONG vs SHORT para o mesmo símbolo
+            long_cands = [c for c in symbol_candidates if c.direction == "long"]
+            short_cands = [c for c in symbol_candidates if c.direction == "short"]
+
+            if long_cands and short_cands:
+                best_long = max(long_cands, key=lambda c: c.score.trade_score)
+                best_short = max(short_cands, key=lambda c: c.score.trade_score)
+                score_diff = best_long.score.trade_score - best_short.score.trade_score
+
+                if score_diff >= 5.0 or (score_diff > 0 and result.trend == "Bullish"):
+                    raw_candidates_by_symbol[symbol] = [best_long]
+                elif score_diff <= -5.0 or (score_diff < 0 and result.trend == "Bearish"):
+                    raw_candidates_by_symbol[symbol] = [best_short]
+                else:
+                    # Conflito direcional grave / empate em zona de ruído: rejeitar ambas
+                    no_edge.append({
+                        "symbol": symbol,
+                        "regime": regime_result.regime,
+                        "reason": "DIRECTION_CONFLICT: Sinais simultâneos de LONG e SHORT com scores equivalentes.",
+                    })
+            else:
+                raw_candidates_by_symbol[symbol] = symbol_candidates
+        elif not found_for_symbol:
+            no_edge.append({
+                "symbol": symbol,
+                "regime": regime_result.regime,
+                "reason": f"Sem setup qualificado com RR >= {effective_global_min_rr} e Score >= 70 no regime {regime_result.regime}.",
+            })
+
+    # Consolidar todos os candidatos aprovados pelos Hard Gates
+    candidates: list[OpportunityResult] = []
+    for sym_cands in raw_candidates_by_symbol.values():
+        candidates.extend(sym_cands)
+
+    # 7. CORRELATED EXPOSURE FILTER & RE-RANKING
+    candidates.sort(key=lambda c: c.score.trade_score, reverse=True)
+
 
     if len(candidates) > 1 and len(returns_by_symbol) > 1:
         ranked_symbols_in_order = list(dict.fromkeys(c.symbol for c in candidates))
