@@ -47,31 +47,37 @@ def _normalize_url(url: str) -> str:
 
 
 def _sync_schema_columns(engine: Engine, resolved_url: str) -> None:
-    """Adiciona colunas novas em tabelas existentes caso não tenham sido criadas."""
-    if resolved_url.startswith("sqlite"):
-        try:
-            from sqlalchemy import text
-            with engine.connect() as conn:
+    """Adiciona colunas novas em tabelas existentes caso não tenham sido criadas (compatível com SQLite e PostgreSQL)."""
+    from sqlalchemy import text
+    new_cols = {
+        "entry_price": "DOUBLE PRECISION" if "postgres" in resolved_url else "FLOAT",
+        "exit_price": "DOUBLE PRECISION" if "postgres" in resolved_url else "FLOAT",
+        "exit_reason": "VARCHAR(32)",
+        "realized_pnl_pct": "DOUBLE PRECISION" if "postgres" in resolved_url else "FLOAT",
+        "realized_r_multiple": "DOUBLE PRECISION" if "postgres" in resolved_url else "FLOAT",
+        "regime": "VARCHAR(32)",
+        "opened_at": "TIMESTAMP WITH TIME ZONE" if "postgres" in resolved_url else "DATETIME",
+        "closed_at": "TIMESTAMP WITH TIME ZONE" if "postgres" in resolved_url else "DATETIME",
+        "duration_minutes": "DOUBLE PRECISION" if "postgres" in resolved_url else "FLOAT",
+    }
+    try:
+        with engine.connect() as conn:
+            if "postgres" in resolved_url:
+                for col, ctype in new_cols.items():
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN IF NOT EXISTS {col} {ctype}"))
+                conn.commit()
+            elif resolved_url.startswith("sqlite"):
                 res = conn.execute(text("PRAGMA table_info(setups)"))
                 existing = {row[1] for row in res.fetchall()}
                 if existing:
-                    new_cols = {
-                        "entry_price": "FLOAT",
-                        "exit_price": "FLOAT",
-                        "exit_reason": "VARCHAR(32)",
-                        "realized_pnl_pct": "FLOAT",
-                        "realized_r_multiple": "FLOAT",
-                        "regime": "VARCHAR(32)",
-                        "opened_at": "DATETIME",
-                        "closed_at": "DATETIME",
-                        "duration_minutes": "FLOAT",
-                    }
                     for col, ctype in new_cols.items():
                         if col not in existing:
                             conn.execute(text(f"ALTER TABLE setups ADD COLUMN {col} {ctype}"))
                     conn.commit()
-        except Exception:
-            pass
+    except Exception as exc:
+        import logging
+        logging.getLogger("alphaquant.persistence").warning(f"Aviso ao sincronizar schema do banco: {exc}")
+
 
 
 @lru_cache(maxsize=8)

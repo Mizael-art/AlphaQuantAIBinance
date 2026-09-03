@@ -21,3 +21,5 @@ venv/
 .vscode/
 *.log
 *.db
+*.db-*
+
