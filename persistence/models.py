@@ -71,12 +71,20 @@ class SetupRecord(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Campos de rastreamento de Sinal Telegram e Execução (Master Prompt 2026)
+    signal_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    signal_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    signal_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    signal_status: Mapped[str | None] = mapped_column(String(32), nullable=True, default="NO_SIGNAL")
+    trade_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
     status_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     __table_args__ = (
         Index("ix_setups_lookup", "asset", "direction", "strategy", "status"),
+        Index("ix_setups_signal_lookup", "signal_id", "signal_status"),
     )
 
     def to_dict(self) -> dict:
@@ -111,10 +119,16 @@ class SetupRecord(Base):
             "opened_at": self.opened_at.isoformat() if self.opened_at else None,
             "closed_at": self.closed_at.isoformat() if self.closed_at else None,
             "duration_minutes": self.duration_minutes,
+            "signal_id": self.signal_id,
+            "signal_sent_at": self.signal_sent_at.isoformat() if self.signal_sent_at else None,
+            "signal_message_id": self.signal_message_id,
+            "signal_status": self.signal_status,
+            "trade_opened_at": self.trade_opened_at.isoformat() if self.trade_opened_at else None,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
             "status_changed_at": self.status_changed_at.isoformat(),
         }
+
 
 
 

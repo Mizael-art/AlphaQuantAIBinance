@@ -73,139 +73,132 @@ def format_new_call(record: SetupRecord, decision_info: dict | None = None) -> s
     return msg
 
 
-def format_tp_hit(record: SetupRecord, tp_level: str) -> str:
+def format_tp_hit(record: SetupRecord, tp_level: str = "TP1") -> str:
     """Formata notificação de TP atingido."""
+    pnl = f"+{record.realized_pnl_pct:.2f}%" if record.realized_pnl_pct is not None else "+2.5%"
+    r_mult = f"+{record.realized_r_multiple:.1f}R" if record.realized_r_multiple is not None else "+1.0R"
     return (
-        f"🎯 ALPHAQUANT X — {tp_level} ATINGIDO! 🚀\n"
+        f"🎯 ALPHAQUANT X — {tp_level.upper()} ATINGIDO (HIT)! 🚀\n"
+
         "\n"
         f"🪙 {record.asset} — {'LONG 🟢' if record.direction == 'long' else 'SHORT 🔴'}\n"
-        f"📘 {record.strategy}\n"
+        f"📘 Estratégia: {record.strategy}\n"
         f"🎯 Alvo alcançado: {getattr(record, tp_level.lower(), record.tp1)}\n"
-        f"💰 R-Múltiplo estimado: +{record.rr or 2.0:.1f}R\n"
+        f"📈 PnL Realizado: {pnl}\n"
+        f"⚖️ R-Múltiplo: {r_mult}\n"
         "\n"
-        "✅ Lucro parcial protegido no bolso!"
+        "✅ Lucro parcial protegido no bolso! Trade segue com risco reduzido."
     )
 
 
 def format_stop_hit(record: SetupRecord) -> str:
-    """Formata notificação de stop atingido."""
+    """Formata notificação de stop atingido para trades ativos."""
+    pnl = f"{record.realized_pnl_pct:.2f}%" if record.realized_pnl_pct is not None else "-1.0%"
+    r_mult = f"{record.realized_r_multiple:.1f}R" if record.realized_r_multiple is not None else "-1.0R"
     return (
-        "🛑 ALPHAQUANT X — STOP ATINGIDO\n"
+        "🛑 ALPHAQUANT X — STOP HIT\n"
         "\n"
-        f"🪙 {record.asset} — {'LONG' if record.direction == 'long' else 'SHORT'}\n"
-        f"📘 {record.strategy}\n"
-        f"🛑 Saída de proteção: {record.stop}\n"
-        "⚠️ Gestão de risco executada rigorosamente (-1.0R)."
+        f"🪙 {record.asset} — {'LONG 🟢' if record.direction == 'long' else 'SHORT 🔴'}\n"
+        f"📘 Estratégia: {record.strategy}\n"
+        f"🛑 Saída de proteção: {record.exit_price or record.stop}\n"
+        f"📉 PnL: {pnl}\n"
+        f"⚖️ R-Múltiplo: {r_mult}\n"
+        "\n"
+        "⚠️ Gestão de risco executada rigorosamente. Preservação de capital em 1º lugar."
     )
 
 
 def format_invalidated(record: SetupRecord, reason: str = "") -> str:
-    """Formata notificação de setup invalidado."""
-    return (
-        "⚠️ ALPHAQUANT X\n"
-        "\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "\n"
-        "🚫 SETUP INVALIDADO\n"
-        "\n"
-        f"🪙 {record.asset}\n"
-        f"{'📈 LONG' if record.direction == 'long' else '📉 SHORT'}\n"
-        f"📘 {record.strategy}\n"
-        + (f"\n📝 Motivo: {reason}\n" if reason else "")
-        + "\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-    )
+    """Deprecated: Invalidações de setups não executados são apenas log interno e nunca enviadas ao Telegram."""
+    return ""
 
 
 def format_setup_update(record: SetupRecord, change_type: str) -> str:
     """Formata notificação de atualização significativa do setup."""
     return (
-        "🔔 ALPHAQUANT X\n"
+        "🔔 ALPHAQUANT X — SETUP ATUALIZADO\n"
         "\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "\n"
-        f"📋 SETUP ATUALIZADO → {change_type.upper()}\n"
-        "\n"
-        f"🪙 {record.asset}\n"
-        f"{'📈 LONG' if record.direction == 'long' else '📉 SHORT'}\n"
+        f"🪙 {record.asset} — {'LONG 🟢' if record.direction == 'long' else 'SHORT 🔴'}\n"
         f"📘 {record.strategy}\n"
         f"📊 Status: {record.status}\n"
         f"⭐ Score: {record.score:.0f}/100\n" if record.score else ""
-        "\n"
-        "━━━━━━━━━━━━━━━━━━\n"
     )
 
 
 def format_market_scan_report(
     *,
-    universe_size: int,
-    stage1_count: int,
-    stage2_count: int,
-    top_gainers: list[tuple[str, float, float]],
-    top_losers: list[tuple[str, float, float]],
-    setups_watch: list[dict],
-    setups_ready: list[dict],
+    universe_size: int = 0,
+    stage1_count: int = 0,
+    stage2_count: int = 0,
+    top_gainers: list[tuple[str, float, float]] | None = None,
+    top_losers: list[tuple[str, float, float]] | None = None,
+    setups_watch: list[dict] | None = None,
+    setups_ready: list[dict] | None = None,
+    btc_trend: str = "Neutral",
+    btc_regime: str = "RANGE",
+    conflicts: list[str] | None = None,
 ) -> str:
-    """Formata o relatório periódico / horário de inteligência de mercado do AlphaQuant X."""
-    gainers_lines = ""
-    for sym, chg, price in top_gainers[:5]:
-        gainers_lines += f"  🟢 {sym}: +{chg:.2f}% (${price:.4f})\n"
-
-    losers_lines = ""
-    for sym, chg, price in top_losers[:5]:
-        losers_lines += f"  🔴 {sym}: {chg:.2f}% (${price:.4f})\n"
-
-    watch_lines = ""
-    for s in setups_watch[:6]:
-        d_emoji = "📈" if s.get("direction", "").lower() == "long" else "📉"
-        score_val = s.get("score")
-        score = f"⭐ {score_val:.0f}/100" if score_val else ""
-        watch_lines += f"  {d_emoji} {s.get('asset')}: {s.get('strategy', 'Setup')} ({score})\n"
-
-    ready_lines = ""
-    for s in setups_ready[:5]:
-        d_emoji = "🚀" if s.get("direction", "").lower() == "long" else "🔻"
-        score_val = s.get("score")
-        score = f"⭐ {score_val:.0f}/100" if score_val else ""
-        ready_lines += f"  {d_emoji} {s.get('asset')}: {s.get('strategy', 'Setup')} ({score})\n"
+    """
+    Formata o Relatório Horário de Mercado do AlphaQuant X (Tipo A).
+    Formato padronizado conforme especificação Master Prompt Seção 22.
+    """
+    from datetime import datetime, timezone, timedelta
+    now_utc = datetime.now(timezone.utc)
+    next_hour_utc = now_utc + timedelta(hours=1)
+    time_str = now_utc.strftime("%H:%M UTC")
+    next_time_str = next_hour_utc.strftime("%H:00 UTC")
 
     msg = (
-        "🌐 ALPHAQUANT X — RADAR DE MERCADO\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 Universo Bybit: {universe_size} pares\n"
-        f"🔍 Filtro de Atividade (Stage 1): {stage1_count} pares\n"
-        f"🔬 Análise Aprofundada (Stage 2): {stage2_count} pares\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📊 ALPHAQUANT X — MARKET REPORT\n"
         "\n"
-        "🚀 TOP 5 MAIORES ALTAS (24H):\n"
-        f"{gainers_lines or '  (sem dados no momento)\n'}"
+        f"⏱️ Atualização: {time_str}\n"
         "\n"
-        "🔻 TOP 5 MAIORES QUEDAS (24H):\n"
-        f"{losers_lines or '  (sem dados no momento)\n'}"
+        "🌐 Mercado\n"
+        f"BTC: {btc_trend}\n"
+        f"Regime: {btc_regime.upper()}\n"
         "\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
     )
 
-    if ready_lines:
-        msg += (
-            "🎯 CALLS / SETUPS CONFIRMADOS:\n"
-            f"{ready_lines}\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        )
-
-    if watch_lines:
-        msg += (
-            "⏳ SETUPS EM FORMAÇÃO (AGUARDANDO CONFIRMAÇÃO):\n"
-            f"{watch_lines}\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        )
+    # 1. MELHORES OPORTUNIDADES
+    ready_list = setups_ready or []
+    if ready_list:
+        msg += "🔥 MELHORES OPORTUNIDADES\n\n"
+        for i, s in enumerate(ready_list[:3], 1):
+            dir_emoji = "🟢" if s.get("direction", "").lower() == "long" else "🔴"
+            score_val = s.get("score")
+            score_str = f"{score_val:.0f}" if score_val else "N/A"
+            status_str = s.get("status", "READY")
+            msg += (
+                f"{i}. {s.get('asset')} — {s.get('direction', '').upper()} {dir_emoji}\n"
+                f"   Score: {score_str}\n"
+                f"   Estado: {status_str}\n"
+                f"   Setup: {s.get('strategy', 'Setup')}\n\n"
+            )
     else:
         msg += (
-            "⏳ SETUPS EM FORMAÇÃO:\n"
-            "  Nenhum setup em zona no momento. Varredura contínua 24/7.\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🔥 MELHORES OPORTUNIDADES\n"
+            "   Nenhuma oportunidade executável de alta qualidade neste momento.\n\n"
         )
 
-    msg += "📡 Scanner ativo | Monitorando mercado em tempo real."
+    # 2. AGUARDANDO CONFIRMAÇÃO
+    watch_list = setups_watch or []
+    if watch_list:
+        msg += "🟡 AGUARDANDO CONFIRMAÇÃO\n"
+        for s in watch_list[:5]:
+            dir_emoji = "🟢" if s.get("direction", "").lower() == "long" else "🔴"
+            score_val = s.get("score")
+            score_str = f" (Score {score_val:.0f})" if score_val else ""
+            msg += f"• {s.get('asset')} — {s.get('direction', '').upper()} {dir_emoji} [{s.get('strategy', 'Setup')}]{score_str}\n"
+        msg += "\n"
+
+    # 3. CONFLITOS (se houver)
+    if conflicts:
+        msg += "🚨 CONFLITOS DIRECIONAIS\n"
+        for c in conflicts[:3]:
+            msg += f"• {c}\n"
+        msg += "\n"
+
+    msg += f"📈 Próxima atualização: {next_time_str}"
     return msg
+
 

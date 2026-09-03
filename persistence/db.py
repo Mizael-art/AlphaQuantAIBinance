@@ -59,6 +59,11 @@ def _sync_schema_columns(engine: Engine, resolved_url: str) -> None:
         "opened_at": "TIMESTAMP WITH TIME ZONE" if "postgres" in resolved_url else "DATETIME",
         "closed_at": "TIMESTAMP WITH TIME ZONE" if "postgres" in resolved_url else "DATETIME",
         "duration_minutes": "DOUBLE PRECISION" if "postgres" in resolved_url else "FLOAT",
+        "signal_id": "VARCHAR(64)",
+        "signal_sent_at": "TIMESTAMP WITH TIME ZONE" if "postgres" in resolved_url else "DATETIME",
+        "signal_message_id": "BIGINT" if "postgres" in resolved_url else "INTEGER",
+        "signal_status": "VARCHAR(32)",
+        "trade_opened_at": "TIMESTAMP WITH TIME ZONE" if "postgres" in resolved_url else "DATETIME",
     }
     try:
         with engine.connect() as conn:

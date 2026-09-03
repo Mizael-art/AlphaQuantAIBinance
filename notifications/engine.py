@@ -32,6 +32,8 @@ from notifications.formatter import (
 from notifications.telegram import send_message
 from persistence.models import SetupRecord
 
+from datetime import datetime, timezone
+
 logger = logging.getLogger("alphaquant.notifications.engine")
 
 
@@ -41,8 +43,9 @@ def process_new_setup(
     decision_info: dict | None = None,
 ) -> bool:
     """
-    Processa notificação para um setup recém-criado.
-    Retorna True se a notificação foi enviada.
+    Processa notificação para um setup confirmado que passou pelo Final Trade Quality Gate.
+    Registra signal_id, signal_sent_at, signal_message_id e signal_status.
+    Retorna True se a notificação foi enviada com sucesso.
     """
     if not should_send_notification(session, record.id, "new_setup"):
         return False
@@ -53,6 +56,13 @@ def process_new_setup(
     telegram_msg_id = None
     if result and result.get("ok"):
         telegram_msg_id = result.get("result", {}).get("message_id")
+
+    now_utc = datetime.now(timezone.utc)
+    record.signal_id = f"SIG-{record.asset}-{now_utc.strftime('%Y%m%d%H%M%S')}-{record.id}"
+    record.signal_sent_at = now_utc
+    record.signal_message_id = telegram_msg_id
+    record.signal_status = "SIGNAL_SENT"
+    record.trade_opened_at = record.trade_opened_at or now_utc
 
     record_signal_sent(
         session,
@@ -71,14 +81,19 @@ def process_setup_event(
     reason: str = "",
 ) -> bool:
     """
-    Processa notificações para eventos de setup (TP, stop, invalidação).
+    Processa notificações para eventos de trades ativos (TP1/2/3, STOP).
+    Regra absoluta: NUNCA envia 'invalidated' para setups que não foram trades reais.
 
     Args:
-        event_type: "tp1_hit" | "tp2_hit" | "tp3_hit" | "stop_hit" | "invalidated" | "completed"
-        reason: motivo do evento (para invalidação).
+        event_type: "tp1_hit" | "tp2_hit" | "tp3_hit" | "stop_hit" | "completed"
+        reason: motivo do evento.
 
     Returns True se a notificação foi enviada.
     """
+    # Se o setup nunca foi publicado como sinal no Telegram, NUNCA notificar eventos
+    if record.signal_sent_at is None:
+        return False
+
     if not should_send_notification(session, record.id, event_type):
         return False
 
@@ -86,12 +101,12 @@ def process_setup_event(
     if event_type.startswith("tp"):
         tp_map = {"tp1_hit": "TP1", "tp2_hit": "TP2", "tp3_hit": "TP3"}
         message = format_tp_hit(record, tp_map.get(event_type, "TP"))
-    elif event_type == "stop_hit":
+    elif event_type in ("stop_hit", "invalidated"):
         message = format_stop_hit(record)
-    elif event_type == "invalidated":
-        message = format_invalidated(record, reason)
+    elif event_type == "completed":
+        message = format_tp_hit(record, "TP3")
     else:
-        logger.info(f"[NOTIFY] Evento '{event_type}' para setup #{record.id} não tem template. Suprimido.")
+        logger.info(f"[NOTIFY] Evento '{event_type}' para setup #{record.id} suprimido.")
         return False
 
     result = send_message(message)
@@ -116,33 +131,27 @@ def process_monitoring_updates(
 ) -> int:
     """
     Processa notificações baseadas nos updates do monitoring cycle.
+    Regra de Ouro:
+    - Se o setup nunca teve call enviada (signal_sent_at == None) -> SILÊNCIO TOTAL no Telegram.
+    - Se o setup estava ativo com call e bateu no stop -> STOP HIT (nunca 'setup invalidado').
+    - Se atingiu TP1/TP2/TP3 -> TP HIT.
     Retorna a quantidade de sinais enviados.
-
-    Args:
-        updates: lista de dicts do MonitoringCycleResult.updated
-                 ex: [{"setup_id": 42, "asset": "BTCUSDT", "from": "ACTIVE", "to": "TP1", "reason": "..."}]
     """
     signals_sent = 0
 
-    # Mapeamento de transições para tipos de evento notificáveis
     _NOTIFY_TRANSITIONS = {
         "TP1": "tp1_hit",
         "TP2": "tp2_hit",
         "TP3": "tp3_hit",
         "COMPLETED": "completed",
-        "INVALIDATED": "invalidated",
+        "INVALIDATED": "stop_hit",  # Trade ativo que atinge stop deve virar STOP HIT, nunca mensagem de invalidado
     }
 
     for update in updates:
         new_status = update.get("to", "")
-        old_status = update.get("from", "")
         event_type = _NOTIFY_TRANSITIONS.get(new_status)
 
         if event_type is None:
-            continue  # Transição não gera notificação
-
-        # Só notifica invalidação se o setup estava REALMENTE ativo ou pronto para entrada
-        if event_type == "invalidated" and old_status not in ("ACTIVE", "READY", "TRIGGERED", "ENTRY_READY"):
             continue
 
         setup_id = update.get("setup_id")
@@ -153,9 +162,16 @@ def process_monitoring_updates(
         if record is None:
             continue
 
+        # REGRA ABSOLUTA: Se este setup nunca teve call enviada ao Telegram,
+        # NUNCA enviar TP, STOP ou INVALIDADO ao grupo! Registrar apenas no banco.
+        if record.signal_sent_at is None:
+            logger.debug(f"[MONITOR] Setup #{setup_id} ({record.asset}) sem call enviada. Evento {new_status} mantido apenas interno.")
+            continue
+
         reason = update.get("reason", "")
         sent = process_setup_event(session, record, event_type, reason)
         if sent:
             signals_sent += 1
 
     return signals_sent
+

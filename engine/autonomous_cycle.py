@@ -41,8 +41,9 @@ from risk.repository import build_risk_limits, build_risk_state, get_or_create_a
 from notifications.engine import process_monitoring_updates, process_new_setup
 from scanner.screener import scan_universe
 from setups.lifecycle import WATCH
-from setups.memory import upsert_setup
+from setups.memory import list_setups, upsert_setup
 from setups.schema import EntryZone, SetupCandidate
+
 
 logger = logging.getLogger("alphaquant.engine.cycle")
 
@@ -369,6 +370,7 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
                 for s in open_setups if s.status in ("READY", "TRIGGERED", "ENTRY_READY", "ACTIVE")
             ]
 
+            btc_direction = "Bullish" if any("BTC" in s.get("asset", "") and s.get("direction") == "long" for s in ready_list + watch_list) else "Neutral"
             report_msg = format_market_scan_report(
                 universe_size=cycle.universe_size or len(tickers),
                 stage1_count=cycle.stage1_count or 60,
@@ -377,7 +379,10 @@ def _execute_pipeline(session: Session, cycle: SystemCycle) -> None:
                 top_losers=top_losers,
                 setups_watch=watch_list,
                 setups_ready=ready_list,
+                btc_trend=btc_direction,
+                btc_regime="TRENDING" if btc_direction != "Neutral" else "RANGE",
             )
+
             send_message(report_msg)
             _last_hourly_report_sent = now_ts
             logger.info("[TELEGRAM] Relatório horário de radar de mercado enviado com sucesso.")

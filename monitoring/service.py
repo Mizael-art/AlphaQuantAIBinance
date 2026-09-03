@@ -90,10 +90,13 @@ def run_monitoring_cycle(session: Session, market_data: MarketData | None = None
         record.status_changed_at = now
         record.reason_for_change = update.reason
 
-        # Inicializar abertura do trade
+        # Inicializar abertura do trade e status de execução
         if not record.entry_price and record.status in ("NEAR_ENTRY", "READY", "TRIGGERED", "ACTIVE"):
             record.entry_price = quote
             record.opened_at = now
+            if record.signal_sent_at and not record.trade_opened_at:
+                record.trade_opened_at = now
+                record.signal_status = "ACTIVE"
 
         # Calcular encerramento e resultado financeiro real
         if update.new_status in ("COMPLETED", "INVALIDATED", "TP1", "TP2", "TP3"):
@@ -116,6 +119,11 @@ def run_monitoring_cycle(session: Session, market_data: MarketData | None = None
                 record.exit_reason = "STOP" if update.new_status == "INVALIDATED" else "TP"
                 if record.opened_at:
                     record.duration_minutes = (now - record.opened_at).total_seconds() / 60.0
+                
+                if record.signal_sent_at:
+                    record.signal_status = "STOP_HIT" if update.new_status == "INVALIDATED" else "CLOSED"
+            elif record.signal_sent_at:
+                record.signal_status = f"{update.new_status}_HIT"
 
         updated.append({"setup_id": record.id, "asset": record.asset, "from": previous_status, "to": update.new_status, "reason": update.reason})
 
